@@ -1,0 +1,292 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from uuid import UUID
+from datetime import datetime
+
+from database import get_db
+from models import Room, Round, Pair, Action, Message, Indicator, Player
+from schemas import (
+    RoundCurrentResponse,
+    PairResponse,
+    ActionSubmit,
+    ActionResponse,
+    RoundResultResponse,
+    MessageSubmit,
+    MessageResponse,
+    IndicatorResponse
+)
+from game_logic import calculate_round_results, all_actions_submitted, assign_indicators
+from api.websocket import broadcast_event, WSEventType
+
+router = APIRouter(prefix="/api/rooms", tags=["rounds"])
+
+
+@router.get("/{room_id}/rounds/current", response_model=RoundCurrentResponse)
+def get_current_round(room_id: UUID, db: Session = Depends(get_db)):
+    """Get current round information."""
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    current_round = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == room.current_round
+    ).first()
+
+    if not current_round:
+        raise HTTPException(status_code=404, detail="No active round")
+
+    return RoundCurrentResponse(
+        round_number=current_round.round_number,
+        phase=current_round.phase,
+        status=current_round.status
+    )
+
+
+@router.get("/{room_id}/rounds/{round_number}/pair", response_model=PairResponse)
+def get_player_pair(
+    room_id: UUID,
+    round_number: int,
+    player_id: UUID = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get opponent information for a player in a specific round."""
+    round_obj = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == round_number
+    ).first()
+
+    if not round_obj:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    pair = db.query(Pair).filter(
+        Pair.round_id == round_obj.id,
+        ((Pair.player1_id == player_id) | (Pair.player2_id == player_id))
+    ).first()
+
+    if not pair:
+        raise HTTPException(status_code=404, detail="Pair not found")
+
+    opponent_id = pair.player2_id if pair.player1_id == player_id else pair.player1_id
+    opponent = db.query(Player).filter(Player.id == opponent_id).first()
+
+    return PairResponse(
+        opponent_id=opponent_id,
+        opponent_display_name=opponent.display_name
+    )
+
+
+@router.post("/{room_id}/rounds/{round_number}/action", response_model=ActionResponse)
+async def submit_action(
+    room_id: UUID,
+    round_number: int,
+    action_data: ActionSubmit,
+    db: Session = Depends(get_db)
+):
+    """Submit player action for a round."""
+    round_obj = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == round_number
+    ).first()
+
+    if not round_obj:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    # Check if action already submitted
+    existing_action = db.query(Action).filter(
+        Action.round_id == round_obj.id,
+        Action.player_id == action_data.player_id
+    ).first()
+
+    if existing_action:
+        raise HTTPException(status_code=400, detail="Action already submitted")
+
+    action = Action(
+        room_id=room_id,
+        round_id=round_obj.id,
+        player_id=action_data.player_id,
+        choice=action_data.choice
+    )
+    db.add(action)
+    db.commit()
+
+    # Check if all actions submitted
+    if all_actions_submitted(round_obj.id, db):
+        calculate_round_results(round_obj.id, db)
+        await broadcast_event(room_id, WSEventType.ROUND_ENDED, {
+            "round_number": round_number
+        })
+
+    return ActionResponse(status="ok")
+
+
+@router.get("/{room_id}/rounds/{round_number}/result", response_model=RoundResultResponse)
+def get_round_result(
+    room_id: UUID,
+    round_number: int,
+    player_id: UUID = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get round result for a specific player."""
+    round_obj = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == round_number
+    ).first()
+
+    if not round_obj:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    # Get player's action
+    player_action = db.query(Action).filter(
+        Action.round_id == round_obj.id,
+        Action.player_id == player_id
+    ).first()
+
+    if not player_action or player_action.payoff is None:
+        raise HTTPException(status_code=404, detail="Result not available yet")
+
+    # Find opponent
+    pair = db.query(Pair).filter(
+        Pair.round_id == round_obj.id,
+        ((Pair.player1_id == player_id) | (Pair.player2_id == player_id))
+    ).first()
+
+    if not pair:
+        raise HTTPException(status_code=404, detail="Pair not found")
+
+    opponent_id = pair.player2_id if pair.player1_id == player_id else pair.player1_id
+    opponent = db.query(Player).filter(Player.id == opponent_id).first()
+    opponent_action = db.query(Action).filter(
+        Action.round_id == round_obj.id,
+        Action.player_id == opponent_id
+    ).first()
+
+    return RoundResultResponse(
+        opponent_display_name=opponent.display_name,
+        your_choice=player_action.choice,
+        opponent_choice=opponent_action.choice,
+        your_payoff=player_action.payoff,
+        opponent_payoff=opponent_action.payoff
+    )
+
+
+@router.post("/{room_id}/rounds/{round_number}/message", response_model=ActionResponse)
+async def send_message(
+    room_id: UUID,
+    round_number: int,
+    message_data: MessageSubmit,
+    db: Session = Depends(get_db)
+):
+    """Send a message to opponent after a round (Rounds 5-6)."""
+    round_obj = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == round_number
+    ).first()
+
+    if not round_obj:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    # Check if messaging is allowed in this round
+    if round_number not in [5, 6]:
+        raise HTTPException(status_code=400, detail="Messaging not allowed in this round")
+
+    # Find receiver (opponent)
+    pair = db.query(Pair).filter(
+        Pair.round_id == round_obj.id,
+        ((Pair.player1_id == message_data.sender_id) | (Pair.player2_id == message_data.sender_id))
+    ).first()
+
+    if not pair:
+        raise HTTPException(status_code=404, detail="Pair not found")
+
+    receiver_id = pair.player2_id if pair.player1_id == message_data.sender_id else pair.player1_id
+
+    # Check if message already sent
+    existing_message = db.query(Message).filter(
+        Message.round_id == round_obj.id,
+        Message.sender_id == message_data.sender_id
+    ).first()
+
+    if existing_message:
+        raise HTTPException(status_code=400, detail="Message already sent")
+
+    message = Message(
+        room_id=room_id,
+        round_id=round_obj.id,
+        sender_id=message_data.sender_id,
+        receiver_id=receiver_id,
+        content=message_data.content
+    )
+    db.add(message)
+    db.commit()
+
+    await broadcast_event(room_id, WSEventType.MESSAGE_PHASE, {})
+
+    return ActionResponse(status="ok")
+
+
+@router.get("/{room_id}/rounds/{round_number}/message", response_model=MessageResponse)
+def get_message(
+    room_id: UUID,
+    round_number: int,
+    player_id: UUID = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get message from opponent for a specific round."""
+    round_obj = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == round_number
+    ).first()
+
+    if not round_obj:
+        raise HTTPException(status_code=404, detail="Round not found")
+
+    message = db.query(Message).filter(
+        Message.round_id == round_obj.id,
+        Message.receiver_id == player_id
+    ).first()
+
+    if not message:
+        raise HTTPException(status_code=404, detail="No message found")
+
+    return MessageResponse(content=message.content, from_opponent=True)
+
+
+@router.post("/{room_id}/indicators/assign", response_model=ActionResponse)
+async def assign_indicators_endpoint(room_id: UUID, db: Session = Depends(get_db)):
+    """Assign indicators to all players (Host endpoint, after Round 6)."""
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    if room.current_round < 6:
+        raise HTTPException(status_code=400, detail="Indicators can only be assigned after Round 6")
+
+    # Check if already assigned
+    existing = db.query(Indicator).filter(Indicator.room_id == room_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Indicators already assigned")
+
+    assign_indicators(room_id, db)
+
+    await broadcast_event(room_id, WSEventType.INDICATORS_ASSIGNED, {})
+
+    return ActionResponse(status="ok")
+
+
+@router.get("/{room_id}/indicator", response_model=IndicatorResponse)
+def get_player_indicator(
+    room_id: UUID,
+    player_id: UUID = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get indicator for a specific player."""
+    indicator = db.query(Indicator).filter(
+        Indicator.room_id == room_id,
+        Indicator.player_id == player_id
+    ).first()
+
+    if not indicator:
+        raise HTTPException(status_code=404, detail="Indicator not assigned yet")
+
+    return IndicatorResponse(symbol=indicator.symbol)

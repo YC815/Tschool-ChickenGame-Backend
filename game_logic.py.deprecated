@@ -1,0 +1,173 @@
+import random
+import string
+from uuid import UUID
+from sqlalchemy.orm import Session
+from typing import List, Tuple
+
+from models import Room, Player, Round, Pair, Action, Choice, RoundStatus, RoundPhase, Indicator
+
+
+def generate_room_code() -> str:
+    """Generate a random 6-character uppercase room code."""
+    return ''.join(random.choices(string.ascii_uppercase, k=6))
+
+
+def generate_display_name(room_id: UUID, db: Session) -> str:
+    """Generate a unique display name for a player in format 'Animal N'."""
+    animals = ["狐狸", "老鷹", "熊", "虎", "狼", "鹿", "豹", "獅", "兔", "蛇"]
+
+    existing_players = db.query(Player).filter(Player.room_id == room_id).all()
+    count = len(existing_players)
+
+    animal = animals[count % len(animals)]
+    number = (count // len(animals)) + 1
+
+    return f"{animal} {number}"
+
+
+def create_pairs_for_round(room_id: UUID, round_id: UUID, db: Session) -> List[Pair]:
+    """
+    Create random pairs for a round.
+    Shuffles all players and pairs them sequentially.
+    """
+    players = db.query(Player).filter(
+        Player.room_id == room_id,
+        Player.is_host == False
+    ).all()
+
+    if len(players) % 2 != 0:
+        raise ValueError("Player count must be even for pairing")
+
+    random.shuffle(players)
+
+    pairs = []
+    for i in range(0, len(players), 2):
+        pair = Pair(
+            room_id=room_id,
+            round_id=round_id,
+            player1_id=players[i].id,
+            player2_id=players[i + 1].id
+        )
+        db.add(pair)
+        pairs.append(pair)
+
+    db.commit()
+    return pairs
+
+
+def calculate_payoff(choice1: Choice, choice2: Choice) -> Tuple[int, int]:
+    """
+    Calculate payoff for both players based on their choices.
+
+    Payoff matrix (player1, player2):
+    |              | P2: turn | P2: accelerate |
+    |--------------|----------|----------------|
+    | P1: turn     | (3, 3)   | (-3, 10)       |
+    | P1: accelerate | (10, -3) | (-10, -10)   |
+
+    Returns: (payoff1, payoff2)
+    """
+    if choice1 == Choice.TURN and choice2 == Choice.TURN:
+        return (3, 3)
+    elif choice1 == Choice.TURN and choice2 == Choice.ACCELERATE:
+        return (-3, 10)
+    elif choice1 == Choice.ACCELERATE and choice2 == Choice.TURN:
+        return (10, -3)
+    else:  # both accelerate
+        return (-10, -10)
+
+
+def calculate_round_results(round_id: UUID, db: Session) -> None:
+    """
+    Calculate payoffs for all pairs in a round.
+    Updates Action.payoff for each player.
+    """
+    round_obj = db.query(Round).filter(Round.id == round_id).first()
+    if not round_obj:
+        raise ValueError("Round not found")
+
+    round_obj.status = RoundStatus.CALCULATING
+    db.commit()
+
+    pairs = db.query(Pair).filter(Pair.round_id == round_id).all()
+
+    for pair in pairs:
+        action1 = db.query(Action).filter(
+            Action.round_id == round_id,
+            Action.player_id == pair.player1_id
+        ).first()
+
+        action2 = db.query(Action).filter(
+            Action.round_id == round_id,
+            Action.player_id == pair.player2_id
+        ).first()
+
+        if not action1 or not action2:
+            continue
+
+        payoff1, payoff2 = calculate_payoff(action1.choice, action2.choice)
+
+        action1.payoff = payoff1
+        action2.payoff = payoff2
+
+    round_obj.status = RoundStatus.COMPLETED
+    db.commit()
+
+
+def all_actions_submitted(round_id: UUID, db: Session) -> bool:
+    """Check if all players in a round have submitted their actions."""
+    round_obj = db.query(Round).filter(Round.id == round_id).first()
+    if not round_obj:
+        return False
+
+    # Count non-host players
+    player_count = db.query(Player).filter(
+        Player.room_id == round_obj.room_id,
+        Player.is_host == False
+    ).count()
+
+    action_count = db.query(Action).filter(Action.round_id == round_id).count()
+
+    return action_count == player_count
+
+
+def assign_indicators(room_id: UUID, db: Session) -> None:
+    """
+    Assign indicators to all players in a room.
+    Distributes symbols evenly among players.
+    """
+    symbols = ["🍋", "🍎", "🍇", "🍊"]
+
+    players = db.query(Player).filter(
+        Player.room_id == room_id,
+        Player.is_host == False
+    ).all()
+
+    random.shuffle(players)
+
+    for i, player in enumerate(players):
+        symbol = symbols[i % len(symbols)]
+        indicator = Indicator(
+            room_id=room_id,
+            player_id=player.id,
+            symbol=symbol
+        )
+        db.add(indicator)
+
+    db.commit()
+
+
+def get_round_phase(round_number: int) -> RoundPhase:
+    """Determine the phase for a given round number."""
+    if round_number in [5, 6]:
+        return RoundPhase.MESSAGE
+    elif round_number == 7:
+        return RoundPhase.INDICATOR
+    else:
+        return RoundPhase.NORMAL
+
+
+def calculate_total_payoff(player_id: UUID, db: Session) -> int:
+    """Calculate total payoff for a player across all rounds."""
+    actions = db.query(Action).filter(Action.player_id == player_id).all()
+    return sum(action.payoff for action in actions if action.payoff is not None)

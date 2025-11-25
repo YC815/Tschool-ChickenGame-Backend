@@ -4,4 +4,15 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "alembic>=1.17.2",
+    "fastapi>=0.121.3",
+    "psycopg2-binary>=2.9.11",
+    "pydantic>=2.12.4",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.2.1",
+    "python-multipart>=0.0.20",
+    "sqlalchemy>=2.0.44",
+    "uvicorn>=0.38.0",
+    "websockets>=15.0.1",
+]
