@@ -5,7 +5,7 @@
 """
 import random
 import string
-from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from models import Room, Player
@@ -24,7 +24,7 @@ def generate_room_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase, k=6))
 
 
-def generate_display_name(room_id: UUID, db: Session) -> str:
+def generate_display_name(room_id: str, db: Session) -> str:
     """
     為房間內的新玩家生成顯示名稱
 

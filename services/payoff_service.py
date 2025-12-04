@@ -3,7 +3,7 @@
 
 純計算邏輯，實現 Game Theory 的 Payoff Matrix
 """
-from uuid import UUID
+
 from sqlalchemy.orm import Session
 from typing import Tuple
 
@@ -50,7 +50,7 @@ def calculate_payoff(choice1: Choice, choice2: Choice) -> Tuple[int, int]:
         return (-10, -10)
 
 
-def calculate_round_payoffs(round_id: UUID, db: Session) -> None:
+def calculate_round_payoffs(round_id: str, db: Session) -> None:
     """
     計算一個回合內所有配對的 Payoff
 
@@ -103,7 +103,7 @@ def calculate_round_payoffs(round_id: UUID, db: Session) -> None:
     db.flush()
 
 
-def calculate_total_payoff(player_id: UUID, db: Session) -> int:
+def calculate_total_payoff(player_id: str, db: Session) -> int:
     """
     計算一個玩家在整場遊戲的總 Payoff
 
@@ -128,7 +128,7 @@ def calculate_total_payoff(player_id: UUID, db: Session) -> int:
     return sum(action.payoff for action in actions if action.payoff is not None)
 
 
-def all_actions_submitted(round_id: UUID, db: Session) -> bool:
+def all_actions_submitted(round_id: str, db: Session) -> bool:
     """
     檢查一個回合是否所有玩家都已提交 Action
 

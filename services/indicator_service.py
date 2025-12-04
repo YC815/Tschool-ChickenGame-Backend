@@ -6,13 +6,13 @@
 - 增加遊戲的匿名性和策略性
 """
 import random
-from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from models import Player, Indicator
 
 
-def assign_indicators(room_id: UUID, db: Session) -> None:
+def assign_indicators(room_id: str, db: Session) -> None:
     """
     為房間內所有玩家分配指標符號
 
@@ -58,7 +58,7 @@ def assign_indicators(room_id: UUID, db: Session) -> None:
     db.flush()
 
 
-def get_player_indicator(player_id: UUID, db: Session) -> str:
+def get_player_indicator(player_id: str, db: Session) -> str:
     """
     取得玩家的指標符號
 
@@ -85,7 +85,7 @@ def get_player_indicator(player_id: UUID, db: Session) -> str:
     return indicator.symbol
 
 
-def indicators_already_assigned(room_id: UUID, db: Session) -> bool:
+def indicators_already_assigned(room_id: str, db: Session) -> bool:
     """
     檢查房間內是否已經分配過指標
 

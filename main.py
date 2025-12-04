@@ -1,16 +1,24 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 from database import Base, engine
 from api import rooms, players, rounds, websocket
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: 在應用啟動時建立資料庫表
+    Base.metadata.create_all(bind=engine)
+    yield
+    # Shutdown: 如果需要清理資源可以加在這裡
+
 
 app = FastAPI(
     title="Chicken Game API",
     description="Backend API for multiplayer game theory teaching platform",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS configuration

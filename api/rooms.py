@@ -15,7 +15,6 @@ Room API Endpoints
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from uuid import UUID
 import asyncio
 import logging
 
@@ -112,7 +111,7 @@ def get_room_status(code: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{room_id}/start")
-async def start_game(room_id: UUID, db: Session = Depends(get_db)):
+async def start_game(room_id: str, db: Session = Depends(get_db)):
     """
     開始遊戲（Host endpoint）
 
@@ -162,7 +161,7 @@ async def start_game(room_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{room_id}/rounds/next")
-async def next_round(room_id: UUID, db: Session = Depends(get_db)):
+async def next_round(room_id: str, db: Session = Depends(get_db)):
     """
     開始下一回合（Host endpoint）
 
@@ -205,7 +204,7 @@ async def next_round(room_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{room_id}/end")
-async def end_game(room_id: UUID, db: Session = Depends(get_db)):
+async def end_game(room_id: str, db: Session = Depends(get_db)):
     """
     結束遊戲（Host endpoint）
 
@@ -238,7 +237,7 @@ async def end_game(room_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.get("/{room_id}/summary", response_model=GameSummaryResponse)
-def get_game_summary(room_id: UUID, db: Session = Depends(get_db)):
+def get_game_summary(room_id: str, db: Session = Depends(get_db)):
     """
     取得遊戲摘要（排名和統計）
 
@@ -305,7 +304,7 @@ def get_game_summary(room_id: UUID, db: Session = Depends(get_db)):
 
 @router.get("/{room_id}/events/since/{last_event_id}")
 def get_events_since(
-    room_id: UUID,
+    room_id: str,
     last_event_id: int,
     db: Session = Depends(get_db)
 ):
@@ -361,13 +360,13 @@ def get_events_since(
 # ============ WebSocket 通知輔助函式 ============
 # 這些函式確保 WebSocket 通知在 DB commit 之後發送
 
-async def _notify_room_started(room_id: UUID):
+async def _notify_room_started(room_id: str):
     """發送「遊戲開始」通知"""
     await asyncio.sleep(0)  # 讓出控制權，確保 DB commit 完成
     await broadcast_event(room_id, WSEventType.ROOM_STARTED, {})
 
 
-async def _notify_round_started(room_id: UUID, round_number: int, phase: str):
+async def _notify_round_started(room_id: str, round_number: int, phase: str):
     """發送「回合開始」通知"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.ROUND_STARTED, {
@@ -376,7 +375,7 @@ async def _notify_round_started(room_id: UUID, round_number: int, phase: str):
     })
 
 
-async def _notify_game_ended(room_id: UUID):
+async def _notify_game_ended(room_id: str):
     """發送「遊戲結束」通知"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.GAME_ENDED, {})

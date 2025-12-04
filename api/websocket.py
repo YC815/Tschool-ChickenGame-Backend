@@ -9,7 +9,7 @@ WebSocket Manager - 強化版
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Dict, Set
-from uuid import UUID
+
 import asyncio
 import logging
 
@@ -32,7 +32,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[UUID, Set[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket, room_id: UUID):
+    async def connect(self, websocket: WebSocket, room_id: str):
         """
         接受新的 WebSocket 連線
 
@@ -46,7 +46,7 @@ class ConnectionManager:
         self.active_connections[room_id].add(websocket)
         logger.info(f"WebSocket connected to room {room_id}. Total: {len(self.active_connections[room_id])}")
 
-    def disconnect(self, websocket: WebSocket, room_id: UUID):
+    def disconnect(self, websocket: WebSocket, room_id: str):
         """
         移除 WebSocket 連線
 
@@ -63,7 +63,7 @@ class ConnectionManager:
                 del self.active_connections[room_id]
                 logger.info(f"Room {room_id} has no connections, removed from manager")
 
-    async def broadcast_to_room(self, room_id: UUID, message: dict):
+    async def broadcast_to_room(self, room_id: str, message: dict):
         """
         廣播訊息給房間內所有連線（強化的錯誤處理）
 
@@ -135,7 +135,7 @@ manager = ConnectionManager()
 
 
 @router.websocket("/ws/{room_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: UUID):
+async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await manager.connect(websocket, room_id)
     try:
         while True:
@@ -148,7 +148,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: UUID):
         manager.disconnect(websocket, room_id)
 
 
-async def broadcast_event(room_id: UUID, event_type: str, data: dict = None):
+async def broadcast_event(room_id: str, event_type: str, data: dict = None):
     """Helper function to broadcast events to all clients in a room."""
     event = WSEvent(
         event_type=event_type,

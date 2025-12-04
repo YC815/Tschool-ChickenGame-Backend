@@ -6,12 +6,11 @@
 主要使用 PostgreSQL 的 SELECT ... FOR UPDATE 來實現悲觀鎖（Pessimistic Locking）
 """
 from sqlalchemy.orm import Session, Query
-from uuid import UUID
 
 from models import Room, Round
 
 
-def with_room_lock(room_id: UUID, db: Session) -> Query:
+def with_room_lock(room_id: str, db: Session) -> Query:
     """
     鎖定一個 Room（行級鎖）
 
@@ -42,7 +41,7 @@ def with_room_lock(room_id: UUID, db: Session) -> Query:
     ).with_for_update(nowait=False)
 
 
-def with_round_lock(round_id: UUID, db: Session) -> Query:
+def with_round_lock(round_id: str, db: Session) -> Query:
     """
     鎖定一個 Round（行級鎖）
 
@@ -70,7 +69,7 @@ def with_round_lock(round_id: UUID, db: Session) -> Query:
     ).with_for_update(nowait=False)
 
 
-def lock_multiple_rounds(round_ids: list[UUID], db: Session) -> Query:
+def lock_multiple_rounds(round_ids: list[str], db: Session) -> Query:
     """
     鎖定多個 Rounds（用於批次操作）
 

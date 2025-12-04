@@ -12,7 +12,6 @@ Linus 原則：
 - 所有狀態變更都會被記錄到 Event Log（可追蹤）
 """
 from sqlalchemy.orm import Session
-from uuid import UUID
 from datetime import datetime
 import logging
 
@@ -66,7 +65,7 @@ class RoomStateMachine:
         return to_status in RoomStateMachine.VALID_TRANSITIONS.get(from_status, [])
 
     @staticmethod
-    def transition(room_id: UUID, to_status: RoomStatus, db: Session) -> Room:
+    def transition(room_id: str, to_status: RoomStatus, db: Session) -> Room:
         """
         執行狀態轉換（唯一修改 Room.status 的地方）
 
@@ -164,7 +163,7 @@ class RoundStateMachine:
         return to_status in RoundStateMachine.VALID_TRANSITIONS.get(from_status, [])
 
     @staticmethod
-    def transition(round_id: UUID, to_status: RoundStatus, db: Session) -> Round:
+    def transition(round_id: str, to_status: RoundStatus, db: Session) -> Round:
         """
         執行狀態轉換（唯一修改 Round.status 的地方）
 

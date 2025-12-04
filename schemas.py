@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-from uuid import UUID
 
 from models import RoomStatus, RoundPhase, RoundStatus, Choice
 
@@ -12,16 +11,16 @@ class RoomCreate(BaseModel):
 
 
 class RoomResponse(BaseModel):
-    room_id: UUID
+    room_id: str
     code: str
-    host_player_id: UUID
+    host_player_id: str
 
     class Config:
         from_attributes = True
 
 
 class RoomStatusResponse(BaseModel):
-    room_id: UUID
+    room_id: str
     code: str
     status: RoomStatus
     current_round: int
@@ -37,8 +36,8 @@ class PlayerJoin(BaseModel):
 
 
 class PlayerResponse(BaseModel):
-    player_id: UUID
-    room_id: UUID
+    player_id: str
+    room_id: str
     display_name: str
 
     class Config:
@@ -65,7 +64,7 @@ class RoundCurrentResponse(BaseModel):
 
 # Pair schemas
 class PairResponse(BaseModel):
-    opponent_id: UUID
+    opponent_id: str
     opponent_display_name: str
 
     class Config:
@@ -74,7 +73,7 @@ class PairResponse(BaseModel):
 
 # Action schemas
 class ActionSubmit(BaseModel):
-    player_id: UUID
+    player_id: str
     choice: Choice
 
 
@@ -96,7 +95,7 @@ class RoundResultResponse(BaseModel):
 
 # Message schemas
 class MessageSubmit(BaseModel):
-    sender_id: UUID
+    sender_id: str
     content: str = Field(..., min_length=1, max_length=100)
 
 
@@ -144,5 +143,5 @@ class WSEventType:
 
 class WSEvent(BaseModel):
     event_type: str
-    room_id: UUID
+    room_id: str
     data: Optional[dict] = None

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql://user:password@localhost:5432/chicken_game"
+    database_url: str = "sqlite:///./chicken_game.db"
 
     class Config:
         env_file = ".env"
@@ -22,7 +22,13 @@ def get_settings():
 
 settings = get_settings()
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# SQLite 需要特殊設定：connect_args={"check_same_thread": False}
+# 這允許多執行緒存取同一個 SQLite 連線（FastAPI 的多執行緒環境需要）
+engine = create_engine(
+    settings.database_url,
+    connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

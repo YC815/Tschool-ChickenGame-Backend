@@ -14,7 +14,6 @@ Linus 原則：
 """
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from uuid import UUID
 from typing import Optional
 import logging
 
@@ -49,7 +48,7 @@ class RoundManager:
 
     @staticmethod
     @transactional
-    def create_round(db: Session, room_id: UUID) -> Round:
+    def create_round(db: Session, room_id: str) -> Round:
         """
         建立新回合（含配對）
 
@@ -151,8 +150,8 @@ class RoundManager:
     @transactional
     def submit_action(
         db: Session,
-        round_id: UUID,
-        player_id: UUID,
+        round_id: str,
+        player_id: str,
         choice: Choice
     ) -> Action:
         """
@@ -227,7 +226,7 @@ class RoundManager:
 
     @staticmethod
     @transactional
-    def try_finalize_round(db: Session, round_id: UUID) -> bool:
+    def try_finalize_round(db: Session, round_id: str) -> bool:
         """
         計算回合結果（但不公布）
 
@@ -313,7 +312,7 @@ class RoundManager:
 
     @staticmethod
     @transactional
-    def publish_round(db: Session, round_id: UUID) -> Round:
+    def publish_round(db: Session, round_id: str) -> Round:
         """
         公布回合結果
 
@@ -380,7 +379,7 @@ class RoundManager:
     @staticmethod
     def get_round_by_number(
         db: Session,
-        room_id: UUID,
+        room_id: str,
         round_number: int
     ) -> Optional[Round]:
         """
@@ -400,7 +399,7 @@ class RoundManager:
         ).first()
 
     @staticmethod
-    def get_current_round(db: Session, room_id: UUID) -> Optional[Round]:
+    def get_current_round(db: Session, room_id: str) -> Optional[Round]:
         """
         取得房間當前回合
 

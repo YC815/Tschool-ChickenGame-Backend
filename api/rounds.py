@@ -13,7 +13,7 @@ Linus 的「好品味」體現：
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from uuid import UUID
+
 import asyncio
 import logging
 
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/{room_id}/rounds/current", response_model=RoundCurrentResponse)
-def get_current_round(room_id: UUID, db: Session = Depends(get_db)):
+def get_current_round(room_id: str, db: Session = Depends(get_db)):
     """
     取得當前回合資訊
 
@@ -82,9 +82,9 @@ def get_current_round(room_id: UUID, db: Session = Depends(get_db)):
 
 @router.get("/{room_id}/rounds/{round_number}/pair", response_model=PairResponse)
 def get_player_pair(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
-    player_id: UUID = Query(...),
+    player_id: str = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -127,7 +127,7 @@ def get_player_pair(
 
 @router.post("/{room_id}/rounds/{round_number}/action", response_model=ActionResponse)
 async def submit_action(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
     action_data: ActionSubmit,
     db: Session = Depends(get_db)
@@ -218,7 +218,7 @@ async def submit_action(
 
 @router.post("/{room_id}/rounds/{round_number}/publish", response_model=ActionResponse)
 async def publish_round_results(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
     db: Session = Depends(get_db)
 ):
@@ -266,7 +266,7 @@ async def publish_round_results(
 
 @router.post("/{room_id}/rounds/{round_number}/skip", response_model=ActionResponse)
 async def skip_round(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
     db: Session = Depends(get_db)
 ):
@@ -351,9 +351,9 @@ async def skip_round(
 
 @router.get("/{room_id}/rounds/{round_number}/result", response_model=RoundResultResponse)
 def get_round_result(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
-    player_id: UUID = Query(...),
+    player_id: str = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -412,7 +412,7 @@ def get_round_result(
 
 @router.post("/{room_id}/rounds/{round_number}/message", response_model=ActionResponse)
 async def send_message(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
     message_data: MessageSubmit,
     db: Session = Depends(get_db)
@@ -484,9 +484,9 @@ async def send_message(
 
 @router.get("/{room_id}/rounds/{round_number}/message", response_model=MessageResponse)
 def get_message(
-    room_id: UUID,
+    room_id: str,
     round_number: int,
-    player_id: UUID = Query(...),
+    player_id: str = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -527,7 +527,7 @@ def get_message(
 
 
 @router.post("/{room_id}/indicators/assign", response_model=ActionResponse)
-async def assign_indicators_endpoint(room_id: UUID, db: Session = Depends(get_db)):
+async def assign_indicators_endpoint(room_id: str, db: Session = Depends(get_db)):
     """
     分配指標（Host endpoint，Round 6 之後）
 
@@ -576,8 +576,8 @@ async def assign_indicators_endpoint(room_id: UUID, db: Session = Depends(get_db
 
 @router.get("/{room_id}/indicator", response_model=IndicatorResponse)
 def get_player_indicator_endpoint(
-    room_id: UUID,
-    player_id: UUID = Query(...),
+    room_id: str,
+    player_id: str = Query(...),
     db: Session = Depends(get_db)
 ):
     """
@@ -603,7 +603,7 @@ def get_player_indicator_endpoint(
 
 # ============ WebSocket 通知輔助函式 ============
 
-async def _notify_action_submitted(room_id: UUID, round_number: int, submitted: int, total: int):
+async def _notify_action_submitted(room_id: str, round_number: int, submitted: int, total: int):
     """發送「動作已提交」通知（進度更新）"""
     await asyncio.sleep(0)  # 確保 DB commit 完成
     await broadcast_event(room_id, WSEventType.ACTION_SUBMITTED, {
@@ -613,7 +613,7 @@ async def _notify_action_submitted(room_id: UUID, round_number: int, submitted: 
     })
 
 
-async def _notify_round_ready(room_id: UUID, round_number: int):
+async def _notify_round_ready(room_id: str, round_number: int):
     """發送「回合準備公布」通知（所有人都提交了）"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.ROUND_READY, {
@@ -621,7 +621,7 @@ async def _notify_round_ready(room_id: UUID, round_number: int):
     })
 
 
-async def _notify_round_ended(room_id: UUID, round_number: int):
+async def _notify_round_ended(room_id: str, round_number: int):
     """發送「回合結束」通知（結果已公布，Client 去 GET /result）"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.ROUND_ENDED, {
@@ -629,13 +629,13 @@ async def _notify_round_ended(room_id: UUID, round_number: int):
     })
 
 
-async def _notify_message_sent(room_id: UUID):
+async def _notify_message_sent(room_id: str):
     """發送「訊息階段」通知"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.MESSAGE_PHASE, {})
 
 
-async def _notify_indicators_assigned(room_id: UUID):
+async def _notify_indicators_assigned(room_id: str):
     """發送「指標分配」通知"""
     await asyncio.sleep(0)
     await broadcast_event(room_id, WSEventType.INDICATORS_ASSIGNED, {})

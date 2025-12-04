@@ -7,14 +7,14 @@
 3. 不負責驗證（由 Manager 負責）
 """
 import random
-from uuid import UUID
+
 from sqlalchemy.orm import Session
 from typing import List
 
 from models import Player, Pair
 
 
-def create_pairs_for_round(room_id: UUID, round_id: UUID, db: Session) -> List[Pair]:
+def create_pairs_for_round(room_id: str, round_id: str, db: Session) -> List[Pair]:
     """
     為一個回合建立隨機配對
 
@@ -73,9 +73,9 @@ def create_pairs_for_round(room_id: UUID, round_id: UUID, db: Session) -> List[P
 
 
 def copy_pairs_from_round(
-    room_id: UUID,
-    source_round_id: UUID,
-    target_round_id: UUID,
+    room_id: str,
+    source_round_id: str,
+    target_round_id: str,
     db: Session
 ) -> List[Pair]:
     """
@@ -113,7 +113,7 @@ def copy_pairs_from_round(
     return new_pairs
 
 
-def get_pairs_in_round(round_id: UUID, db: Session) -> List[Pair]:
+def get_pairs_in_round(round_id: str, db: Session) -> List[Pair]:
     """
     取得某回合的所有配對
 
@@ -127,7 +127,7 @@ def get_pairs_in_round(round_id: UUID, db: Session) -> List[Pair]:
     return db.query(Pair).filter(Pair.round_id == round_id).all()
 
 
-def get_opponent_id(round_id: UUID, player_id: UUID, db: Session) -> UUID:
+def get_opponent_id(round_id: str, player_id: str, db: Session) -> str:
     """
     找出玩家在某回合的對手 ID
 

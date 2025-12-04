@@ -13,7 +13,6 @@ Linus 原則：
 - 資料結構優先：先檢查資料是否符合要求，再執行操作
 """
 from sqlalchemy.orm import Session
-from uuid import UUID
 from typing import Tuple
 import logging
 
@@ -91,7 +90,7 @@ class RoomManager:
 
     @staticmethod
     @transactional
-    def start_game(db: Session, room_id: UUID) -> Room:
+    def start_game(db: Session, room_id: str) -> Room:
         """
         開始遊戲（狀態轉換 WAITING -> PLAYING）
 
@@ -155,7 +154,7 @@ class RoomManager:
 
     @staticmethod
     @transactional
-    def start_game_with_first_round(db: Session, room_id: UUID) -> Tuple[Room, 'Round']:
+    def start_game_with_first_round(db: Session, room_id: str) -> Tuple[Room, 'Round']:
         """
         開始遊戲並立即建立第一輪（組合函式）
 
@@ -272,7 +271,7 @@ class RoomManager:
 
     @staticmethod
     @transactional
-    def end_game(db: Session, room_id: UUID) -> Room:
+    def end_game(db: Session, room_id: str) -> Room:
         """
         結束遊戲（狀態轉換 PLAYING -> FINISHED）
 
@@ -331,7 +330,7 @@ class RoomManager:
         return room
 
     @staticmethod
-    def get_room_by_id(db: Session, room_id: UUID) -> Room:
+    def get_room_by_id(db: Session, room_id: str) -> Room:
         """
         透過 UUID 取得 Room
 
@@ -351,7 +350,7 @@ class RoomManager:
         return room
 
     @staticmethod
-    def get_player_count(db: Session, room_id: UUID) -> int:
+    def get_player_count(db: Session, room_id: str) -> int:
         """
         取得房間內玩家數量（不含 Host）
 

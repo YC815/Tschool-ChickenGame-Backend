@@ -1,5 +1,4 @@
 from sqlalchemy import Column, String, Integer, Boolean, ForeignKey, DateTime, Enum, Index, JSON
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -35,9 +34,9 @@ class Choice(str, enum.Enum):
 class Room(Base):
     __tablename__ = "rooms"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     code = Column(String(6), unique=True, nullable=False, index=True)
-    status = Column(Enum(RoomStatus, native_enum=True, values_callable=lambda x: [e.value for e in x]), default=RoomStatus.WAITING, nullable=False)
+    status = Column(Enum(RoomStatus), default=RoomStatus.WAITING, nullable=False)
     current_round = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -53,8 +52,8 @@ class Room(Base):
 class Player(Base):
     __tablename__ = "players"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
     nickname = Column(String(50), nullable=False)
     display_name = Column(String(50), nullable=False)
     is_host = Column(Boolean, default=False, nullable=False)
@@ -70,11 +69,11 @@ class Player(Base):
 class Round(Base):
     __tablename__ = "rounds"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
     round_number = Column(Integer, nullable=False)
-    phase = Column(Enum(RoundPhase, native_enum=True, values_callable=lambda x: [e.value for e in x]), default=RoundPhase.NORMAL, nullable=False)
-    status = Column(Enum(RoundStatus, native_enum=True, values_callable=lambda x: [e.value for e in x]), default=RoundStatus.WAITING_ACTIONS, nullable=False)
+    phase = Column(Enum(RoundPhase), default=RoundPhase.NORMAL, nullable=False)
+    status = Column(Enum(RoundStatus), default=RoundStatus.WAITING_ACTIONS, nullable=False)
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at = Column(DateTime, nullable=True)
 
@@ -92,11 +91,11 @@ class Round(Base):
 class Pair(Base):
     __tablename__ = "pairs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
-    round_id = Column(UUID(as_uuid=True), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
-    player1_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
-    player2_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    round_id = Column(String(36), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
+    player1_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    player2_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
 
     room = relationship("Room", back_populates="pairs")
     round = relationship("Round", back_populates="pairs")
@@ -107,11 +106,11 @@ class Pair(Base):
 class Action(Base):
     __tablename__ = "actions"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
-    round_id = Column(UUID(as_uuid=True), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
-    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
-    choice = Column(Enum(Choice, native_enum=True, values_callable=lambda x: [e.value for e in x]), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    round_id = Column(String(36), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    choice = Column(Enum(Choice), nullable=False)
     payoff = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -128,11 +127,11 @@ class Action(Base):
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
-    round_id = Column(UUID(as_uuid=True), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
-    sender_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
-    receiver_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    round_id = Column(String(36), ForeignKey("rounds.id", ondelete="CASCADE"), nullable=False)
+    sender_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    receiver_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
     content = Column(String(100), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -145,9 +144,9 @@ class Message(Base):
 class Indicator(Base):
     __tablename__ = "indicators"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
-    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False, unique=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(String(36), ForeignKey("players.id", ondelete="CASCADE"), nullable=False, unique=True)
     symbol = Column(String(10), nullable=False)
 
     room = relationship("Room", back_populates="indicators")
@@ -168,7 +167,7 @@ class EventLog(Base):
 
     # 使用自增整數 ID，方便客戶端查詢 "給我 event_id > X 的所有事件"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    room_id = Column(UUID(as_uuid=True), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False, index=True)
+    room_id = Column(String(36), ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False, index=True)
     event_type = Column(String(50), nullable=False, index=True)
     data = Column(JSON, nullable=False, default={})
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
