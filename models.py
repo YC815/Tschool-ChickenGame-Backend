@@ -37,6 +37,8 @@ class Room(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     code = Column(String(6), unique=True, nullable=False, index=True)
     status = Column(Enum(RoomStatus), default=RoomStatus.WAITING, nullable=False)
+    # 用於短輪詢的狀態版本號，每次狀態變更就遞增
+    state_version = Column(Integer, default=1, nullable=False)
     current_round = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

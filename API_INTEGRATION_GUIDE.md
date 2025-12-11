@@ -1,6 +1,6 @@
 # Chicken Game Backend - API Integration Guide
 
-**Purpose:** This document provides a complete, no-nonsense guide to integrate with the Chicken Game backend. It covers both REST API and WebSocket communication.
+**Purpose:** This document provides a complete, no-nonsense guide to integrate with the Chicken Game backend. It now uses pure REST + short polling with `state_version` (WebSocket removed; legacy notes kept at the bottom for reference).
 
 **Target Audience:** Frontend developers, mobile developers, or anyone building a client for this game.
 
@@ -12,9 +12,10 @@
 2. [Core Concepts](#core-concepts)
 3. [Game Flow](#game-flow)
 4. [REST API Reference](#rest-api-reference)
-5. [WebSocket Guide](#websocket-guide)
-6. [Error Handling](#error-handling)
-7. [Special Rules](#special-rules)
+5. [Short Polling Guide](#short-polling-guide)
+6. [Legacy WebSocket Notes](#legacy-websocket-notes)
+7. [Error Handling](#error-handling)
+8. [Special Rules](#special-rules)
 
 ---
 
@@ -105,8 +106,7 @@ curl -X POST http://localhost:8000/api/rooms/550e8400-e29b-41d4-a716-44665544000
 1. Room status changes from `WAITING` → `PLAYING`
 2. Round 1 is automatically created
 3. Players are paired up randomly
-4. WebSocket event `ROOM_STARTED` is broadcasted
-5. WebSocket event `ROUND_STARTED` is broadcasted
+4. `state_version` increments so polling `/api/rooms/{room_id}/state` now returns `status=PLAYING` and `current_round=1`
 
 ### Step 5: Get Current Round
 
@@ -158,10 +158,9 @@ curl -X POST http://localhost:8000/api/rooms/550e8400-e29b-41d4-a716-44665544000
 - `TURN`: Turn away
 
 **What happens:**
-1. Action is saved to database
-2. WebSocket event `ACTION_SUBMITTED` is sent (progress update)
-3. If all players submitted, round status changes to `READY_TO_PUBLISH`
-4. WebSocket event `ROUND_READY` is sent (waiting for host to publish results)
+1. Action is saved to database (idempotent)
+2. `state_version` increments so `/state` shows updated progress (`submitted_actions`)
+3. When all players submit, round status changes to `READY_TO_PUBLISH` and `state_version` bumps again
 
 ### Step 8: Host Publishes Results
 
@@ -176,8 +175,7 @@ curl -X POST http://localhost:8000/api/rooms/550e8400-e29b-41d4-a716-44665544000
 
 **What happens:**
 1. Round status changes from `READY_TO_PUBLISH` → `COMPLETED`
-2. WebSocket event `ROUND_ENDED` is sent
-3. Clients can now fetch results
+2. `state_version` increments; polling `/state` will show `status=COMPLETED` so clients know to call `/result`
 
 ### Step 9: Get Round Result
 
@@ -322,10 +320,11 @@ All critical operations are idempotent:
 - Database locks prevent race conditions
 - No "last person triggers calculation" logic - anyone can trigger, DB ensures it runs once
 
-**3. WebSocket + REST Separation**
+**3. Short polling + REST (no WebSocket)**
 
-- **REST API**: For actions (create, submit, query)
-- **WebSocket**: For notifications (something changed, go fetch new data)
+- **REST API**: All reads/writes
+- **Short polling**: `/api/rooms/{room_id}/state?version=x` every 1–1.5s
+- **state_version**: increments on any change; if version matches, backend returns `has_update=false`
 
 **4. Host vs Player**
 
@@ -360,17 +359,14 @@ All critical operations are idempotent:
      ├──> [4b] Players submit actions
      │         POST /rounds/{n}/action
      │         │
-     │         ├──> [Progress] ACTION_SUBMITTED event
-     │         │    (X/N players submitted)
+     │         ├──> [Progress] state_version bump (X/N submitted shown in /state)
      │         │
-     │         └──> [All submitted] Round status → READY_TO_PUBLISH
-     │              ROUND_READY event sent
+     │         └──> [All submitted] Round status → READY_TO_PUBLISH (seen via /state)
      │
      ├──> [4c] Host publishes results
      │         POST /rounds/{n}/publish
      │         │
-     │         └──> Round status → COMPLETED
-     │              ROUND_ENDED event sent
+     │         └──> Round status → COMPLETED (reflected in /state)
      │
      ├──> [4d] Players view results
      │         GET /rounds/{n}/result
@@ -470,10 +466,8 @@ All critical operations are idempotent:
 **Side Effects:**
 1. Room status → `PLAYING`
 2. Round 1 created automatically
-3. Players paired randomly
-4. WebSocket events sent:
-   - `ROOM_STARTED`
-   - `ROUND_STARTED` (round_number=1)
+3. Players paired randomly for Round 1
+4. `state_version` increments so `/state` shows `status=PLAYING` and `current_round=1`
 
 **Errors:**
 - `400 Invalid player count`: Not enough players or odd number
@@ -500,8 +494,8 @@ All critical operations are idempotent:
 **Side Effects:**
 1. New round created
 2. Room.current_round incremented
-3. Players re-paired (new random pairing)
-4. WebSocket event sent: `ROUND_STARTED`
+3. Pairs copied from Round 1 (same opponents for the rest of the game)
+4. `state_version` increments so `/state` shows the new round
 
 **Errors:**
 - `400 All rounds completed`: Already played 10 rounds
@@ -522,7 +516,7 @@ All critical operations are idempotent:
 
 **Side Effects:**
 1. Room status → `FINISHED`
-2. WebSocket event sent: `GAME_ENDED`
+2. `state_version` increments so `/state` shows `status=FINISHED`
 
 ---
 
@@ -673,11 +667,11 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 
 **Side Effects:**
 1. Action saved to database
-2. WebSocket event sent: `ACTION_SUBMITTED` (progress: X/N submitted)
+2. `state_version` bumps so `/state` shows updated `submitted_actions`
 3. If all submitted:
    - Round status → `READY_TO_PUBLISH`
    - Payoffs calculated automatically
-   - WebSocket event sent: `ROUND_READY`
+   - `state_version` bumps again (clients see `status=ready_to_publish`)
 
 **Notes:**
 - **Idempotent**: Submitting twice with same choice → OK (returns existing action)
@@ -698,7 +692,7 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 
 **Side Effects:**
 1. Round status → `COMPLETED`
-2. WebSocket event sent: `ROUND_ENDED`
+2. `state_version` bumps so `/state` shows `status=COMPLETED`
 3. Players can now fetch results
 
 **Notes:**
@@ -723,7 +717,7 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 1. For players who haven't submitted: auto-submit `TURN`
 2. Calculate payoffs
 3. Immediately publish results (skip READY_TO_PUBLISH state)
-4. WebSocket event sent: `ROUND_ENDED` (with `skipped: true` flag)
+4. `state_version` bumps so `/state` shows the completed round
 
 ---
 
@@ -778,7 +772,7 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 - Message is sent to current opponent (based on pairing)
 
 **Side Effects:**
-- WebSocket event sent: `MESSAGE_PHASE`
+- `state_version` bumps; receiver sees message via `/state` or GET `/message`
 
 **Errors:**
 - `400 Messages are only allowed in Round 5-6`: Wrong round
@@ -821,7 +815,7 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 
 **Side Effects:**
 1. Each player gets a unique emoji indicator (e.g., 🍋, 🍎, 🍊)
-2. WebSocket event sent: `INDICATORS_ASSIGNED`
+2. `state_version` bumps; `/state` shows `indicators_assigned=true` and per-player `indicator_symbol`
 
 **Notes:**
 - Can only be done once per game
@@ -851,467 +845,63 @@ curl "http://localhost:8000/api/rooms/{room_id}/rounds/1/pair?player_id=770e8400
 
 ---
 
-## WebSocket Guide
+## Short Polling Guide
 
-### Connection
+- **Endpoint:** `GET /api/rooms/{room_id}/state?version=<client_version>&player_id=<optional>`
+- **Interval:** 1000–1500ms (classroom-friendly, no WebSocket needed)
+- **Version rule:** If `client_version >= server_version` → `{ "has_update": false, "version": <same> }`
 
-**Endpoint:** `ws://localhost:8000/ws/{room_id}`
-
-**Example (JavaScript):**
-```javascript
-const roomId = "550e8400-e29b-41d4-a716-446655440000";
-const ws = new WebSocket(`ws://localhost:8000/ws/${roomId}`);
-
-ws.onopen = () => {
-  console.log("Connected to room:", roomId);
-};
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log("Event received:", data);
-  handleEvent(data);
-};
-
-ws.onerror = (error) => {
-  console.error("WebSocket error:", error);
-};
-
-ws.onclose = () => {
-  console.log("WebSocket closed");
-  // Implement reconnection logic here
-};
-```
-
-### Keep-Alive (Optional)
-
-```javascript
-// Send ping every 30 seconds to keep connection alive
-setInterval(() => {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send("ping");
-  }
-}, 30000);
-
-ws.onmessage = (event) => {
-  if (event.data === "pong") {
-    console.log("Keep-alive: pong received");
-    return;
-  }
-
-  const data = JSON.parse(event.data);
-  handleEvent(data);
-};
-```
-
----
-
-### Event Types
-
-All events follow this format:
+**No update response**
 ```json
 {
-  "event_type": "EVENT_NAME",
-  "room_id": "550e8400-e29b-41d4-a716-446655440000",
-  "data": { /* event-specific data */ }
+  "version": 12,
+  "has_update": false
 }
 ```
 
-#### 1. `ROOM_STARTED`
-**When:** Host starts the game
-
-**Data:**
-```json
-{}
-```
-
-**Client Action:**
-- Update UI to show "Game started"
-- Fetch current round: `GET /rounds/current`
-
----
-
-#### 2. `ROUND_STARTED`
-**When:** New round begins (either Round 1 or after `POST /rounds/next`)
-
-**Data:**
+**Update response (example)**
 ```json
 {
-  "round_number": 1,
-  "phase": "NORMAL"
-}
-```
-
-**Client Action:**
-- Display round number
-- Fetch opponent: `GET /rounds/{n}/pair?player_id=X`
-- Show action selection UI
-
----
-
-#### 3. `ACTION_SUBMITTED`
-**When:** A player submits an action (progress update)
-
-**Data:**
-```json
-{
-  "round_number": 1,
-  "submitted": 3,
-  "total": 6
-}
-```
-
-**Client Action:**
-- Update progress bar: "3/6 players submitted"
-
----
-
-#### 4. `ROUND_READY`
-**When:** All players submitted, results calculated, waiting for host to publish
-
-**Data:**
-```json
-{
-  "round_number": 1
-}
-```
-
-**Client Action:**
-- **Host:** Show "Publish Results" button
-- **Players:** Show "Waiting for host to publish results..."
-
----
-
-#### 5. `ROUND_ENDED`
-**When:** Host publishes results
-
-**Data:**
-```json
-{
-  "round_number": 1
-}
-```
-
-**Optional (skip scenario):**
-```json
-{
-  "round_number": 1,
-  "skipped": true
-}
-```
-
-**Client Action:**
-- Fetch result: `GET /rounds/{n}/result?player_id=X`
-- Display payoffs and opponent's choice
-- **Host:** Show "Next Round" button
-
----
-
-#### 6. `MESSAGE_PHASE`
-**When:** Someone sends a message (Round 5-6)
-
-**Data:**
-```json
-{}
-```
-
-**Client Action:**
-- Check for message: `GET /rounds/{n}/message?player_id=X`
-- Display message in UI
-
----
-
-#### 7. `INDICATORS_ASSIGNED`
-**When:** Host assigns indicators (after Round 6)
-
-**Data:**
-```json
-{}
-```
-
-**Client Action:**
-- Fetch indicator: `GET /indicator?player_id=X`
-- Display indicator symbol (e.g., 🍋) in UI
-
----
-
-#### 8. `GAME_ENDED`
-**When:** Host ends the game
-
-**Data:**
-```json
-{}
-```
-
-**Client Action:**
-- Fetch summary: `GET /summary`
-- Display leaderboard
-- Disable game UI
-
----
-
-### Reconnection Strategy
-
-**Problem:** WebSocket connections can drop due to network issues.
-
-**Solution:** Use event logs to catch up on missed events.
-
-```javascript
-let lastEventId = 0; // Track last event ID we processed
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-
-  // Assume server includes event_id in all messages
-  if (data.event_id) {
-    lastEventId = Math.max(lastEventId, data.event_id);
-  }
-
-  handleEvent(data);
-};
-
-ws.onclose = () => {
-  console.log("WebSocket closed, attempting to reconnect...");
-
-  // Wait 2 seconds before reconnecting
-  setTimeout(async () => {
-    // Fetch missed events
-    const response = await fetch(
-      `http://localhost:8000/api/rooms/${roomId}/events/since/${lastEventId}`
-    );
-    const { events } = await response.json();
-
-    // Process missed events
-    events.forEach(event => {
-      handleEvent({
-        event_type: event.event_type,
-        room_id: roomId,
-        data: event.data
-      });
-      lastEventId = Math.max(lastEventId, event.event_id);
-    });
-
-    // Reconnect WebSocket
-    reconnectWebSocket();
-  }, 2000);
-};
-```
-
-**Note:** The current implementation does NOT include `event_id` in WebSocket messages. You need to either:
-1. Modify the backend to include it (recommended)
-2. Poll `/events/since` periodically as a fallback
-3. Re-fetch all relevant state (current round, results, etc.) on reconnect
-
----
-
-### Complete Client Example (JavaScript)
-
-```javascript
-class ChickenGameClient {
-  constructor(roomId, playerId) {
-    this.roomId = roomId;
-    this.playerId = playerId;
-    this.baseUrl = "http://localhost:8000";
-    this.ws = null;
-    this.lastEventId = 0;
-  }
-
-  // ========== WebSocket ==========
-
-  connect() {
-    this.ws = new WebSocket(`ws://localhost:8000/ws/${this.roomId}`);
-
-    this.ws.onopen = () => {
-      console.log("✅ Connected to room");
-    };
-
-    this.ws.onmessage = (event) => {
-      if (event.data === "pong") return;
-
-      const data = JSON.parse(event.data);
-      this.handleEvent(data);
-    };
-
-    this.ws.onclose = () => {
-      console.log("❌ WebSocket closed");
-      this.reconnect();
-    };
-
-    // Keep-alive ping
-    setInterval(() => {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send("ping");
-      }
-    }, 30000);
-  }
-
-  reconnect() {
-    console.log("🔄 Reconnecting in 2 seconds...");
-    setTimeout(() => this.connect(), 2000);
-  }
-
-  handleEvent(event) {
-    console.log("📨 Event:", event.event_type, event.data);
-
-    switch (event.event_type) {
-      case "ROOM_STARTED":
-        this.onRoomStarted();
-        break;
-      case "ROUND_STARTED":
-        this.onRoundStarted(event.data.round_number);
-        break;
-      case "ACTION_SUBMITTED":
-        this.onActionSubmitted(event.data.submitted, event.data.total);
-        break;
-      case "ROUND_READY":
-        this.onRoundReady(event.data.round_number);
-        break;
-      case "ROUND_ENDED":
-        this.onRoundEnded(event.data.round_number);
-        break;
-      case "MESSAGE_PHASE":
-        this.onMessagePhase();
-        break;
-      case "INDICATORS_ASSIGNED":
-        this.onIndicatorsAssigned();
-        break;
-      case "GAME_ENDED":
-        this.onGameEnded();
-        break;
-    }
-  }
-
-  // ========== REST API ==========
-
-  async getCurrentRound() {
-    const res = await fetch(`${this.baseUrl}/api/rooms/${this.roomId}/rounds/current`);
-    return res.json();
-  }
-
-  async getOpponent(roundNumber) {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/rounds/${roundNumber}/pair?player_id=${this.playerId}`
-    );
-    return res.json();
-  }
-
-  async submitAction(roundNumber, choice) {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/rounds/${roundNumber}/action`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          player_id: this.playerId,
-          choice: choice // "ACCELERATE" or "TURN"
-        })
-      }
-    );
-    return res.json();
-  }
-
-  async getResult(roundNumber) {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/rounds/${roundNumber}/result?player_id=${this.playerId}`
-    );
-    return res.json();
-  }
-
-  async sendMessage(roundNumber, content) {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/rounds/${roundNumber}/message`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sender_id: this.playerId,
-          content: content
-        })
-      }
-    );
-    return res.json();
-  }
-
-  async getMessage(roundNumber) {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/rounds/${roundNumber}/message?player_id=${this.playerId}`
-    );
-    return res.json();
-  }
-
-  async getIndicator() {
-    const res = await fetch(
-      `${this.baseUrl}/api/rooms/${this.roomId}/indicator?player_id=${this.playerId}`
-    );
-    return res.json();
-  }
-
-  async getSummary() {
-    const res = await fetch(`${this.baseUrl}/api/rooms/${this.roomId}/summary`);
-    return res.json();
-  }
-
-  // ========== Event Handlers (override these) ==========
-
-  onRoomStarted() {
-    console.log("🎮 Game started!");
-  }
-
-  async onRoundStarted(roundNumber) {
-    console.log(`🔄 Round ${roundNumber} started`);
-    const opponent = await this.getOpponent(roundNumber);
-    console.log(`👥 Your opponent: ${opponent.opponent_display_name}`);
-  }
-
-  onActionSubmitted(submitted, total) {
-    console.log(`📊 Progress: ${submitted}/${total} submitted`);
-  }
-
-  onRoundReady(roundNumber) {
-    console.log(`⏳ Round ${roundNumber} ready to publish`);
-  }
-
-  async onRoundEnded(roundNumber) {
-    console.log(`✅ Round ${roundNumber} ended`);
-    const result = await this.getResult(roundNumber);
-    console.log(`💰 Your payoff: ${result.your_payoff}`);
-  }
-
-  async onMessagePhase() {
-    console.log("💬 Message available");
-    const round = await this.getCurrentRound();
-    try {
-      const message = await this.getMessage(round.round_number);
-      console.log(`📩 Message: ${message.content}`);
-    } catch (e) {
-      console.log("No message yet");
-    }
-  }
-
-  async onIndicatorsAssigned() {
-    console.log("🏷️ Indicators assigned");
-    const indicator = await this.getIndicator();
-    console.log(`Your indicator: ${indicator.symbol}`);
-  }
-
-  async onGameEnded() {
-    console.log("🏁 Game ended");
-    const summary = await this.getSummary();
-    console.log("Leaderboard:", summary.players);
+  "version": 13,
+  "has_update": true,
+  "data": {
+    "room": {
+      "room_id": "550e8400-e29b-41d4-a716-446655440000",
+      "code": "ABC123",
+      "status": "PLAYING",
+      "current_round": 2,
+      "player_count": 6
+    },
+    "players": [
+      {"player_id": "p1", "display_name": "狐狸 1", "is_host": false}
+    ],
+    "round": {
+      "round_number": 2,
+      "phase": "NORMAL",
+      "status": "ready_to_publish",
+      "submitted_actions": 6,
+      "total_players": 6,
+      "your_choice": "ACCELERATE",
+      "opponent_choice": "TURN",
+      "opponent_display_name": "狐狸 2",
+      "your_payoff": 10,
+      "opponent_payoff": -3
+    },
+    "indicators_assigned": false,
+    "indicator_symbol": null,
+    "message": null
   }
 }
-
-// Usage
-const client = new ChickenGameClient(
-  "550e8400-e29b-41d4-a716-446655440000", // room_id
-  "770e8400-e29b-41d4-a716-446655440001"  // player_id
-);
-client.connect();
-
-// Submit action
-client.submitAction(1, "ACCELERATE");
 ```
 
----
+**Client tips**
+- Keep `version` in memory; send it with every `/state` call.
+- UI can optimistically disable buttons after submit, and rely on `/state` for confirmation/progress.
+- Stop polling once room status is `FINISHED`.
+
+## Legacy WebSocket Notes
+
+WebSocket support has been removed in favor of short polling + versioning for maximal stability on unreliable networks. Legacy WebSocket examples were removed from this guide; if you must reference them, check git history prior to this revision.
 
 ## Error Handling
 
@@ -1388,8 +978,7 @@ All errors follow this format:
    ```bash
    POST /rounds/{n}/message
    ```
-3. Opponent receives WebSocket event `MESSAGE_PHASE`
-4. Opponent fetches message:
+3. Opponent sees message in `/state` (or fetches directly):
    ```bash
    GET /rounds/{n}/message?player_id=X
    ```
@@ -1417,8 +1006,8 @@ All errors follow this format:
    ```bash
    POST /indicators/assign
    ```
-2. All players receive WebSocket event `INDICATORS_ASSIGNED`
-3. Players fetch their indicator:
+2. All players see `indicators_assigned=true` and `indicator_symbol` in `/state`
+3. Players can also fetch their indicator directly:
    ```bash
    GET /indicator?player_id=X
    ```
@@ -1527,50 +1116,36 @@ Player 1
 
 ```
 1. POST /api/rooms/{code}/join → Get player_id, room_id
-2. Connect WebSocket: ws://localhost:8000/ws/{room_id}
+2. Poll /api/rooms/{room_id}/state?version=<last_version>&player_id=<you> every 1-1.5s
 3. For each round:
-   a. On ROUND_STARTED event:
-      - GET /api/rooms/{room_id}/rounds/{n}/pair?player_id=X
-   b. Submit action:
-      - POST /api/rooms/{room_id}/rounds/{n}/action
-   c. On ROUND_ENDED event:
-      - GET /api/rooms/{room_id}/rounds/{n}/result?player_id=X
-   d. (optional: Round 5-6)
-      - POST /api/rooms/{room_id}/rounds/{n}/message
-      - GET /api/rooms/{room_id}/rounds/{n}/message?player_id=X
-   e. (optional: Round 7+)
-      - GET /api/rooms/{room_id}/indicator?player_id=X
-4. On GAME_ENDED event:
-   - GET /api/rooms/{room_id}/summary
+   a. When /state shows a new round → show opponent (from /state.round.opponent_display_name or GET /rounds/{n}/pair)
+   b. Submit action: POST /api/rooms/{room_id}/rounds/{n}/action
+   c. When /state.round.status == \"completed\" → GET /api/rooms/{room_id}/rounds/{n}/result?player_id=X
+   d. Round 5-6: send message once (POST /message), read via /state.message or GET /message
+   e. Round 7+: indicator available via /state.indicator_symbol or GET /indicator
+4. When /state.room.status == \"FINISHED\" → GET /api/rooms/{room_id}/summary
 ```
 
-### WebSocket Events Summary
+### State Signals to Watch (via /state)
 
-| Event | Trigger | Client Action |
-|-------|---------|---------------|
-| `ROOM_STARTED` | Game started | Fetch current round |
-| `ROUND_STARTED` | New round | Fetch opponent, show action UI |
-| `ACTION_SUBMITTED` | Player submitted | Update progress bar |
-| `ROUND_READY` | All submitted | Host: show publish button |
-| `ROUND_ENDED` | Results published | Fetch result, display payoff |
-| `MESSAGE_PHASE` | Message sent | Fetch message |
-| `INDICATORS_ASSIGNED` | Indicators assigned | Fetch indicator |
-| `GAME_ENDED` | Game ended | Fetch summary, show leaderboard |
+| Signal | Meaning | Client action |
+|--------|---------|---------------|
+| `room.status == \"PLAYING\"` | Game started | Show round UI |
+| `round.status == \"waiting_actions\"` | Round open | Enable action buttons |
+| `round.status == \"ready_to_publish\"` | All actions submitted | Host: show publish button |
+| `round.status == \"completed\"` | Results published | Players: call `/result` |
+| `message` not null | Opponent message arrived | Display message |
+| `indicators_assigned == true` | Indicators ready | Show indicator_symbol |
 
 ---
 
 ## Troubleshooting
 
-### WebSocket keeps disconnecting
+### Polling looks stale (has_update=false but UI not updating)
 
-**Possible causes:**
-1. Network instability
-2. Server restart
-3. No keep-alive (server may close idle connections)
-
-**Solution:**
-- Implement reconnection logic (see [Reconnection Strategy](#reconnection-strategy))
-- Send periodic "ping" messages
+- Ensure you send the latest `version` from the previous `/state` call.
+- Verify the backend bumped `state_version` (check server logs around the action).
+- Include `player_id` so personalized fields (opponent, message, indicator) are returned.
 
 ### "Room not accepting players" error
 
@@ -1593,8 +1168,8 @@ Player 1
 **Cause:** Round not completed
 
 **Solution:**
-- Wait for `ROUND_ENDED` WebSocket event
-- Check round status: `GET /api/rooms/{room_id}/rounds/current`
+- Poll `/state` until `round.status == "completed"`
+- Or check round status: `GET /api/rooms/{room_id}/rounds/current`
 - Only fetch result when `status == "completed"`
 
 ### Actions not being accepted

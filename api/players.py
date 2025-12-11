@@ -15,6 +15,7 @@ from schemas import PlayerJoin, PlayerResponse
 from core.room_manager import RoomManager
 from core.exceptions import RoomNotFound, RoomNotAcceptingPlayers
 from services.naming_service import generate_display_name
+from services.state_service import bump_state_version
 
 router = APIRouter(prefix="/api/rooms", tags=["players"])
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ def join_room(code: str, player_data: PlayerJoin, db: Session = Depends(get_db))
             is_host=False
         )
         db.add(player)
+        bump_state_version(db, room.id, reason="player_joined")
         db.commit()
         db.refresh(player)
 

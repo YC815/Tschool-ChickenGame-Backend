@@ -1,24 +1,18 @@
 """
-Round API Endpoints - 重構版
+Round API Endpoints - 短輪詢版
 
-最關鍵改動：
-1. submit_action() - 修正競態條件，使用冪等性設計
-2. 所有業務邏輯移到 RoundManager
-3. WebSocket 通知在 DB commit 後發送
-
-Linus 的「好品味」體現：
-- 消除特殊情況：任何人都可以呼叫 try_finalize，不用管「誰是最後一個」
-- 冪等性：重複提交不會出錯，重複結算不會重複計算
-- 並發安全：DB lock 確保正確性
+重點：
+1. submit_action 冪等，並在 state_version 上反映進度
+2. 所有業務邏輯集中在 RoundManager
+3. WebSocket 全面移除，前端靠 /state 獲取更新
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-import asyncio
 import logging
 
 from database import get_db
-from models import Round, Player, Action, Message, Indicator, RoundStatus, Choice
+from models import Round, Player, Action, Message, RoundStatus, Choice
 from schemas import (
     RoundCurrentResponse,
     PairResponse,
@@ -33,7 +27,6 @@ from core.round_manager import RoundManager
 from core.room_manager import RoomManager
 from core.exceptions import (
     RoundNotFound,
-    PairNotFound,
     MessageNotAllowedInThisRound,
     MessageAlreadySent,
     IndicatorsAlreadyAssigned,
@@ -46,7 +39,7 @@ from services.indicator_service import (
     indicators_already_assigned
 )
 from services.round_phase_service import is_message_round
-from api.websocket import broadcast_event, WSEventType
+from services.state_service import bump_state_version
 
 router = APIRouter(prefix="/api/rooms", tags=["rounds"])
 logger = logging.getLogger(__name__)
@@ -126,7 +119,7 @@ def get_player_pair(
 
 
 @router.post("/{room_id}/rounds/{round_number}/action", response_model=ActionResponse)
-async def submit_action(
+def submit_action(
     room_id: str,
     round_number: int,
     action_data: ActionSubmit,
@@ -138,7 +131,7 @@ async def submit_action(
     **重大改動**：
     1. 使用 RoundManager.submit_action() - 冪等性設計
     2. 呼叫 RoundManager.try_finalize_round() - 安全的並發設計
-    3. WebSocket 通知在 DB commit 後發送
+    3. 狀態更新改由 state_version 控制，前端靠短輪詢 /state 更新畫面
 
     **消除特殊情況**：
     - 舊版：「最後一個人觸發結算」- 有特殊邏輯
@@ -152,7 +145,6 @@ async def submit_action(
     1. 找到回合
     2. 提交動作（冪等）
     3. 嘗試結算（冪等）
-    4. 如果結算成功，發送 WebSocket 通知
 
     參數：
         room_id: 房間 UUID
@@ -174,38 +166,23 @@ async def submit_action(
         )
 
         # 2. 提交動作（冪等：重複提交會返回既有 Action）
-        action = RoundManager.submit_action(
+        action, created_new = RoundManager.submit_action(
             db,
             round_obj.id,
             action_data.player_id,
             action_data.choice
         )
-
-        # 3. 計算進度
-        submitted_count = db.query(Action).filter(
-            Action.round_id == round_obj.id
-        ).count()
-
-        # 取得該回合的配對數量，計算總玩家數
-        from services.pairing_service import get_pairs_in_round
-        pairs = get_pairs_in_round(round_obj.id, db)
-        total_players = len(pairs) * 2
-
-        # 4. 廣播進度通知（非阻塞）
-        asyncio.create_task(
-            _notify_action_submitted(room_id, round_number, submitted_count, total_players)
+        logger.info(
+            "Action %s for player %s in round %s (room=%s)",
+            "created" if created_new else "reused",
+            action_data.player_id,
+            round_number,
+            room_id
         )
 
-        # 5. 嘗試計算回合結果（冪等：重複呼叫不會重複計算）
+        # 3. 嘗試計算回合結果（冪等：重複呼叫不會重複計算）
         #    注意：這裡只計算，不公布結果
         finalized = RoundManager.try_finalize_round(db, round_obj.id)
-
-        # 6. 如果所有人都提交了，廣播「等待公布」通知
-        if finalized:
-            asyncio.create_task(
-                _notify_round_ready(room_id, round_number)
-            )
-            logger.info(f"Round {round_obj.id} calculated, waiting for publish")
 
         return ActionResponse(status="ok")
 
@@ -217,7 +194,7 @@ async def submit_action(
 
 
 @router.post("/{room_id}/rounds/{round_number}/publish", response_model=ActionResponse)
-async def publish_round_results(
+def publish_round_results(
     room_id: str,
     round_number: int,
     db: Session = Depends(get_db)
@@ -230,8 +207,7 @@ async def publish_round_results(
 
     效果：
     - 狀態轉換 READY_TO_PUBLISH -> COMPLETED
-    - 廣播 ROUND_ENDED
-    - 客戶端收到後呼叫 GET /rounds/{n}/result
+    - 客戶端透過 /state 得知 COMPLETED 後再呼叫 GET /rounds/{n}/result
 
     參數：
         room_id: 房間 UUID
@@ -249,11 +225,6 @@ async def publish_round_results(
         # 2. 公布結果（冪等）
         RoundManager.publish_round(db, round_obj.id)
 
-        # 3. 廣播「結果已公布」通知
-        asyncio.create_task(
-            _notify_round_ended(room_id, round_number)
-        )
-
         logger.info(f"Round {round_number} published for room {room_id}")
         return ActionResponse(status="ok")
 
@@ -265,7 +236,7 @@ async def publish_round_results(
 
 
 @router.post("/{room_id}/rounds/{round_number}/skip", response_model=ActionResponse)
-async def skip_round(
+def skip_round(
     room_id: str,
     round_number: int,
     db: Session = Depends(get_db)
@@ -323,22 +294,12 @@ async def skip_round(
                         db, round_obj.id, player_id, Choice.TURN
                     )
 
-        db.commit()
-
         # 4. 計算結果（如果還沒計算）
         if round_obj.status == RoundStatus.WAITING_ACTIONS:
             RoundManager.try_finalize_round(db, round_obj.id)
 
         # 5. 立即公布結果
         RoundManager.publish_round(db, round_obj.id)
-
-        # 6. 廣播通知（包含 skipped 標記）
-        asyncio.create_task(
-            broadcast_event(room_id, WSEventType.ROUND_ENDED, {
-                "round_number": round_number,
-                "skipped": True
-            })
-        )
 
         logger.info(f"Round {round_number} skipped and published for room {room_id}")
         return ActionResponse(status="ok")
@@ -411,7 +372,7 @@ def get_round_result(
 
 
 @router.post("/{room_id}/rounds/{round_number}/message", response_model=ActionResponse)
-async def send_message(
+def send_message(
     room_id: str,
     round_number: int,
     message_data: MessageSubmit,
@@ -428,7 +389,7 @@ async def send_message(
     1. 檢查回合數
     2. 找到對手
     3. 建立 Message
-    4. 發送 WebSocket 通知
+    4. state_version 會提升，前端透過短輪詢看到新訊息
     """
     try:
         # 1. 檢查是否為訊息回合
@@ -463,12 +424,8 @@ async def send_message(
             content=message_data.content
         )
         db.add(message)
+        bump_state_version(db, room_id, reason="message_sent")
         db.commit()
-
-        # 6. 發送 WebSocket 通知
-        asyncio.create_task(
-            _notify_message_sent(room_id)
-        )
 
         return ActionResponse(status="ok")
 
@@ -527,7 +484,7 @@ def get_message(
 
 
 @router.post("/{room_id}/indicators/assign", response_model=ActionResponse)
-async def assign_indicators_endpoint(room_id: str, db: Session = Depends(get_db)):
+def assign_indicators_endpoint(room_id: str, db: Session = Depends(get_db)):
     """
     分配指標（Host endpoint，Round 6 之後）
 
@@ -555,18 +512,16 @@ async def assign_indicators_endpoint(room_id: str, db: Session = Depends(get_db)
         if indicators_already_assigned(room_id, db):
             raise IndicatorsAlreadyAssigned("Indicators already assigned")
 
-        # 4. 分配指標
+        # 4. 分配指標並提升版本
         assign_indicators(room_id, db)
+        bump_state_version(db, room_id, reason="indicators_assigned")
         db.commit()
-
-        # 5. 發送 WebSocket 通知
-        asyncio.create_task(
-            _notify_indicators_assigned(room_id)
-        )
 
         return ActionResponse(status="ok")
 
     except IndicatorsAlreadyAssigned as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to assign indicators: {e}", exc_info=True)
@@ -599,43 +554,3 @@ def get_player_indicator_endpoint(
     except Exception as e:
         logger.error(f"Failed to get indicator: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
-
-
-# ============ WebSocket 通知輔助函式 ============
-
-async def _notify_action_submitted(room_id: str, round_number: int, submitted: int, total: int):
-    """發送「動作已提交」通知（進度更新）"""
-    await asyncio.sleep(0)  # 確保 DB commit 完成
-    await broadcast_event(room_id, WSEventType.ACTION_SUBMITTED, {
-        "round_number": round_number,
-        "submitted": submitted,
-        "total": total
-    })
-
-
-async def _notify_round_ready(room_id: str, round_number: int):
-    """發送「回合準備公布」通知（所有人都提交了）"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.ROUND_READY, {
-        "round_number": round_number
-    })
-
-
-async def _notify_round_ended(room_id: str, round_number: int):
-    """發送「回合結束」通知（結果已公布，Client 去 GET /result）"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.ROUND_ENDED, {
-        "round_number": round_number
-    })
-
-
-async def _notify_message_sent(room_id: str):
-    """發送「訊息階段」通知"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.MESSAGE_PHASE, {})
-
-
-async def _notify_indicators_assigned(room_id: str):
-    """發送「指標分配」通知"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.INDICATORS_ASSIGNED, {})

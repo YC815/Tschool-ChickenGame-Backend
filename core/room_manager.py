@@ -25,6 +25,7 @@ from core.exceptions import (
     InvalidStateTransition
 )
 from services.naming_service import generate_room_code
+from services.state_service import bump_state_version
 from database import transactional
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,8 @@ class RoomManager:
         )
         db.add(event)
 
+        bump_state_version(db, room_id, reason="game_started")
+
         return room
 
     @staticmethod
@@ -266,6 +269,8 @@ class RoomManager:
         )
         db.add(round_event)
 
+        bump_state_version(db, room_id, reason="game_started_round_created")
+
         # @transactional decorator 會自動 commit
         return room, new_round
 
@@ -306,6 +311,8 @@ class RoomManager:
             data={}
         )
         db.add(event)
+
+        bump_state_version(db, room_id, reason="game_ended")
 
         return room
 

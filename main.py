@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from database import Base, engine
-from api import rooms, players, rounds, websocket
+from api import rooms, players, rounds
 
 
 @asynccontextmanager
@@ -34,7 +34,6 @@ app.add_middleware(
 app.include_router(rooms.router)
 app.include_router(players.router)
 app.include_router(rounds.router)
-app.include_router(websocket.router)
 
 
 @app.get("/")

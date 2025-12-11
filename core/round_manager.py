@@ -27,7 +27,8 @@ from core.exceptions import (
     RoundNotFound,
     MaxRoundsReached,
     ActionAlreadySubmitted,
-    InvalidPlayerCount
+    InvalidPlayerCount,
+    InvalidStateTransition
 )
 from services.pairing_service import (
     create_pairs_for_round,
@@ -38,6 +39,7 @@ from services.payoff_service import (
     all_actions_submitted
 )
 from services.round_phase_service import get_round_phase
+from services.state_service import bump_state_version
 from database import transactional
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,8 @@ class RoundManager:
         )
         db.add(event)
 
+        bump_state_version(db, room_id, reason="round_created")
+
         return new_round
 
     @staticmethod
@@ -153,7 +157,7 @@ class RoundManager:
         round_id: str,
         player_id: str,
         choice: Choice
-    ) -> Action:
+    ) -> tuple[Action, bool]:
         """
         提交玩家動作（冪等性設計）
 
@@ -173,7 +177,7 @@ class RoundManager:
             choice: 玩家選擇（TURN 或 ACCELERATE）
 
         返回：
-            Action object（新建立或既有的）
+            (Action, created_new) tuple
 
         注意：
             - 此函式是冪等的（Idempotent）
@@ -198,11 +202,10 @@ class RoundManager:
         )
         db.add(action)
 
+        created_new = True
         try:
             db.flush()  # 觸發 unique constraint 檢查
             logger.info(f"Action created for player {player_id}")
-            return action
-
         except IntegrityError:
             # 違反 unique constraint：玩家已經提交過
             logger.info(f"Action already exists for player {player_id}, returning existing")
@@ -222,7 +225,13 @@ class RoundManager:
                 )
                 raise
 
-            return existing_action
+            action = existing_action
+            created_new = False
+
+        # action 新增或既有都代表目前狀態對前端有意義（提交進度）
+        bump_state_version(db, round_obj.room_id, reason="action_submitted")
+
+        return action, created_new
 
     @staticmethod
     @transactional
@@ -307,6 +316,8 @@ class RoundManager:
         )
         db.add(event)
 
+        bump_state_version(db, round_obj.room_id, reason="round_ready_to_publish")
+
         logger.info(f"Round {round_id} calculated, waiting for publish")
         return True
 
@@ -372,6 +383,8 @@ class RoundManager:
             }
         )
         db.add(event)
+
+        bump_state_version(db, round_obj.room_id, reason="round_published")
 
         logger.info(f"Round {round_id} published successfully")
         return round_obj

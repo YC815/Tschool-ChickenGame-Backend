@@ -339,7 +339,7 @@
     </style>
 </head>
 <body>
-    <div class="ws-status" id="wsStatus">WS: DISCONNECTED</div>
+    <div class="ws-status" id="wsStatus">POLL: STOPPED</div>
 
     <div class="container">
         <!-- HOST PANEL -->
@@ -348,7 +348,7 @@
 
             <div class="section">
                 <h3>1. 建立房間（產生房號 + 主持人 ID）</h3>
-                <div class="info" style="margin-bottom: 8px;">按下後會自動連線 WebSocket，並把房號填到兩位玩家欄位。</div>
+                <div class="info" style="margin-bottom: 8px;">按下後會啟動短輪詢，並把房號填到兩位玩家欄位。</div>
                 <button onclick="createRoom()">建立房間</button>
                 <div class="info" id="hostInfo" style="display: none;">
                     <div><span class="info-label">Room ID:</span><span class="info-value" id="hostRoomId">-</span></div>
@@ -414,8 +414,8 @@
             </div>
 
             <div class="section">
-                <h3>8. WebSocket 事件流</h3>
-                <div class="info" style="margin-bottom: 8px;">收到事件時可對照流程：ROUND_STARTED → ACTION_SUBMITTED → ROUND_READY → ROUND_ENDED。</div>
+                <h3>8. 輪詢 / 事件紀錄</h3>
+                <div class="info" style="margin-bottom: 8px;">每秒輪詢 /state 會新增一筆 log（有無更新都會顯示）。</div>
                 <div class="log" id="wsLog"></div>
             </div>
         </div>
@@ -583,32 +583,33 @@
         </div>
     </div>
 
+    
     <script>
         // ============================================
         // Configuration
         // ============================================
         const API_BASE = 'http://localhost:8000/api';
-        const WS_BASE = 'ws://localhost:8000/ws';
+        const POLL_INTERVAL_MS = 1000;
 
         // 快速流程定義（細拆）
         const flowSequence = [
             { key: 'createRoom', label: '開房間', action: async () => await createRoom() },
             { key: 'joinPlayers', label: '玩家加入（P1/P2）', action: async () => await quickJoinPlayers() },
             { key: 'startGame', label: '開始遊戲（進入 Round 1）', action: async () => await startGame() },
-            { key: 'round1Info', label: 'Round 1：取得回合與對手', action: async () => { await getRoundInfo(1); await getPair(1); await getRoundInfo(2); await getPair(2); } },
+            { key: 'round1Info', label: 'Round 1：取得回合與對手', action: async () => { await fetchLatestState(true); await getRoundInfo(1); await getPair(1); await getRoundInfo(2); await getPair(2); } },
             { key: 'round1Actions', label: 'Round 1：P1 加速 / P2 轉彎', action: async () => { await submitAction(1, 'ACCELERATE'); await submitAction(2, 'TURN'); } },
             { key: 'round1Publish', label: 'Round 1：公布結果', action: async () => await publishRoundResults() },
             { key: 'toRound2', label: '前往 Round 2', action: async () => await nextRound() },
-            { key: 'round2Info', label: 'Round 2：更新回合資訊（對手固定）', action: async () => { await getRoundInfo(1); await getRoundInfo(2); } },
+            { key: 'round2Info', label: 'Round 2：更新回合資訊（對手固定）', action: async () => { await fetchLatestState(true); await getRoundInfo(1); await getRoundInfo(2); } },
             { key: 'round2Actions', label: 'Round 2：P1 轉彎 / P2 加速', action: async () => { await submitAction(1, 'TURN'); await submitAction(2, 'ACCELERATE'); } },
             { key: 'round2Publish', label: 'Round 2：公布結果', action: async () => await publishRoundResults() },
             { key: 'pushToRound5', label: '推進到 Round 5（跳過中間）', action: async () => { while ((state.host.currentRoundNumber || 0) < 5) { await nextRound(); await delay(200); } } },
-            { key: 'round5Info', label: 'Round 5：更新回合資訊（對手固定）', action: async () => { await getRoundInfo(1); await getRoundInfo(2); } },
+            { key: 'round5Info', label: 'Round 5：更新回合資訊（對手固定）', action: async () => { await fetchLatestState(true); await getRoundInfo(1); await getRoundInfo(2); } },
             { key: 'round5Actions', label: 'Round 5：P1 加速 / P2 轉彎', action: async () => { await submitAction(1, 'ACCELERATE'); await submitAction(2, 'TURN'); } },
             { key: 'round5Message', label: 'Round 5：互相留言', action: async () => { setDefaultMessage(1, 'Hi! 下一輪合作嗎？'); setDefaultMessage(2, '好啊，我們合作！'); await sendMessage(1); await sendMessage(2); await getMessage(1); await getMessage(2); } },
             { key: 'round5Publish', label: 'Round 5：公布結果', action: async () => await publishRoundResults() },
             { key: 'toRound6', label: '前往 Round 6', action: async () => await nextRound() },
-            { key: 'round6Info', label: 'Round 6：更新回合資訊（對手固定）', action: async () => { await getRoundInfo(1); await getRoundInfo(2); } },
+            { key: 'round6Info', label: 'Round 6：更新回合資訊（對手固定）', action: async () => { await fetchLatestState(true); await getRoundInfo(1); await getRoundInfo(2); } },
             { key: 'round6Actions', label: 'Round 6：P1 轉彎 / P2 加速', action: async () => { await submitAction(1, 'TURN'); await submitAction(2, 'ACCELERATE'); } },
             { key: 'round6Publish', label: 'Round 6：公布結果並分配指示物', action: async () => { await publishRoundResults(); await assignIndicators(); if (state.player1.playerId) await getIndicator(1); if (state.player2.playerId) await getIndicator(2); } }
         ];
@@ -621,208 +622,189 @@
             return acc;
         }, {});
 
+        let pollTimer = null;
         let state = {
-            host: {
-                roomId: null,
-                code: null,
-                playerId: null,
-                currentRoundNumber: null
-            },
-            player1: {
-                roomId: null,
-                playerId: null,
-                displayName: null,
-                currentRound: null
-            },
-            player2: {
-                roomId: null,
-                playerId: null,
-                displayName: null,
-                currentRound: null
-            },
-            ws: null,
-            wsConnected: false,
-            roundProgress: {
-                submitted: 0,
-                total: 0
-            },
-            messageSent: {
-                p1: {},
-                p2: {}
-            },
+            host: { roomId: null, code: null, playerId: null, currentRoundNumber: null },
+            player1: { roomId: null, playerId: null, displayName: null, currentRound: null },
+            player2: { roomId: null, playerId: null, displayName: null, currentRound: null },
+            roundProgress: { submitted: 0, total: 0 },
+            messageSent: { p1: {}, p2: {} },
             indicatorsAssigned: false,
-            firstPairFetched: {
-                p1: false,
-                p2: false
-            },
+            firstPairFetched: { p1: false, p2: false },
             flowStatus: { ...initialFlowStatus },
-            flowIndex: 0
+            flowIndex: 0,
+            pollVersion: 0
         };
 
-        async function autoRoundStartActions(roundNumber, phase) {
-            // 自動取得回合資訊；固定對手只需首輪取得
-            if (state.player1.playerId) {
-                await getRoundInfo(1);
-                if (!state.firstPairFetched.p1) await getPair(1);
-                autoSendMessageIfNeeded(1, roundNumber, phase);
-            }
-            if (state.player2.playerId) {
-                await getRoundInfo(2);
-                if (!state.firstPairFetched.p2) await getPair(2);
-                autoSendMessageIfNeeded(2, roundNumber, phase);
-            }
-        }
-
-        async function autoSendMessageIfNeeded(playerNum, roundNumber, phase) {
-            const key = playerNum === 1 ? 'p1' : 'p2';
-            if (phase !== 'MESSAGE') return;
-            if (roundNumber < 5 || roundNumber > 6) return;
-            if (state.messageSent[key][roundNumber]) return;
-            const messageBox = document.getElementById(`p${playerNum}Message`);
-            if (messageBox && !messageBox.value) {
-                messageBox.value = roundNumber === 5 ? 'Hi! 下一輪合作嗎？' : '這輪繼續合作吧！';
-            }
-            await sendMessage(playerNum);
-            state.messageSent[key][roundNumber] = true;
+        function getPollPlayerId() {
+            return state.player1.playerId || state.player2.playerId || null;
         }
 
         // ============================================
-        // WebSocket Management
+        // Logging helpers
         // ============================================
-        function connectWebSocket(roomId) {
-            if (state.ws) {
-                state.ws.close();
-            }
-
-            const wsUrl = `${WS_BASE}/${roomId}`;
-            logWS(`Connecting to ${wsUrl}...`);
-
-            state.ws = new WebSocket(wsUrl);
-
-            state.ws.onopen = () => {
-                state.wsConnected = true;
-                updateWSStatus(true);
-                logWS('✓ WebSocket connected', 'success');
-            };
-
-            state.ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                logWS(`◆ ${data.event_type}`, 'ws-event');
-                handleWSEvent(data);
-            };
-
-            state.ws.onerror = (error) => {
-                logWS('✗ WebSocket error', 'error');
-                console.error(error);
-            };
-
-            state.ws.onclose = () => {
-                state.wsConnected = false;
-                updateWSStatus(false);
-                logWS('✗ WebSocket disconnected', 'error');
-            };
+        function logEvent(message, type = 'ws-event') {
+            const logEl = document.getElementById('wsLog');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
         }
 
-        function updateWSStatus(connected) {
+        function logAPI(message) {
+            console.log(`[API] ${message}`);
+        }
+
+        function updatePollBadge(running) {
             const statusEl = document.getElementById('wsStatus');
-            if (connected) {
-                statusEl.textContent = 'WS: CONNECTED';
+            if (running) {
+                statusEl.textContent = 'POLL: RUNNING';
                 statusEl.className = 'ws-status ws-connected';
             } else {
-                statusEl.textContent = 'WS: DISCONNECTED';
+                statusEl.textContent = 'POLL: STOPPED';
                 statusEl.className = 'ws-status ws-disconnected';
             }
         }
 
-        function handleWSEvent(data) {
-            const { event_type, data: eventData } = data;
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
 
-            switch (event_type) {
-                case 'ROOM_STARTED':
-                    logWS('🎮 Game started!');
-                    updateRoomStatus();
-                    document.getElementById('btnStartGame').disabled = true;
-                    document.getElementById('btnNextRound').disabled = false;
-                    document.getElementById('btnEndGame').disabled = false;
-                    break;
+        // ============================================
+        // Short polling
+        // ============================================
+        function startPolling() {
+            if (!state.host.roomId) return;
+            stopPolling();
+            updatePollBadge(true);
+            logEvent('啟動短輪詢 (/state)', 'success');
+            pollTimer = setInterval(() => pollState(), POLL_INTERVAL_MS);
+            // 立即補一發完整狀態
+            pollState(true);
+        }
 
-                case 'ROUND_STARTED':
-                    logWS(`🔄 Round ${eventData.round_number} started (Phase: ${eventData.phase})`);
-                    state.host.currentRoundNumber = eventData.round_number;
-                    updateRoomStatus();
-                    updateRoundControlUI();
-                    // 重置進度
-                    state.roundProgress = { submitted: 0, total: 0 };
-                    updateProgressBar();
-                    // 隱藏等待提示
-                    document.getElementById('p1Waiting').style.display = 'none';
-                    document.getElementById('p2Waiting').style.display = 'none';
-                    // 清除本輪留言旗標
-                    state.messageSent.p1[eventData.round_number] = false;
-                    state.messageSent.p2[eventData.round_number] = false;
-                    // 自動取回合/配對
-                    autoRoundStartActions(eventData.round_number, eventData.phase);
-                    break;
+        function stopPolling() {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            updatePollBadge(false);
+        }
 
-                case 'ACTION_SUBMITTED':
-                    logWS(`📊 Progress: ${eventData.submitted}/${eventData.total} players submitted`);
-                    state.roundProgress = {
-                        submitted: eventData.submitted,
-                        total: eventData.total
-                    };
-                    updateProgressBar();
-                    updateRoundControlUI();
-                    break;
+        async function pollState(forceFull = false) {
+            if (!state.host.roomId) return;
+            const version = forceFull ? 0 : state.pollVersion;
+            const playerId = getPollPlayerId();
+            let url = `${API_BASE}/rooms/${state.host.roomId}/state?version=${version}`;
+            if (playerId) url += `&player_id=${playerId}`;
 
-                case 'ROUND_READY':
-                    logWS(`✅ Round ${eventData.round_number} ready to publish!`, 'success');
-                    document.getElementById('btnPublishRound').disabled = false;
-                    document.getElementById('roundControlStatus').textContent = 'READY_TO_PUBLISH';
-                    // 顯示等待提示
-                    document.getElementById('p1Waiting').style.display = 'block';
-                    document.getElementById('p2Waiting').style.display = 'block';
-                    break;
+            try {
+                logEvent(`POLL v${version} (player=${playerId || 'none'})`, 'api-call');
+                const res = await fetch(url);
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || res.statusText);
+                }
+                const body = await res.json();
+                if (!body.has_update) {
+                    state.pollVersion = body.version;
+                    logEvent(`POLL v${body.version}: no update`, 'ws-event');
+                    return;
+                }
+                applyStateSnapshot(body.data, body.version, playerId);
+                logEvent(`POLL v${version} → v${body.version}: 已更新`, 'success');
+            } catch (err) {
+                logEvent(`POLL error: ${err.message}`, 'error');
+            }
+        }
 
-                case 'ROUND_ENDED':
-                    const skippedText = eventData.skipped ? ' (SKIPPED)' : '';
-                    logWS(`✓ Round ${eventData.round_number} ended${skippedText}`);
-                    updateRoomStatus();
-                    updateRoundControlUI();
-                    document.getElementById('btnPublishRound').disabled = true;
-                    document.getElementById('btnSkipRound').disabled = true;
-                    // 隱藏等待提示
-                    document.getElementById('p1Waiting').style.display = 'none';
-                    document.getElementById('p2Waiting').style.display = 'none';
-                    // 自動取得結果
-                    setTimeout(() => {
-                        if (state.player1.playerId) getResult(1);
-                        if (state.player2.playerId) getResult(2);
-                    }, 500);
-                    // 自動分配指示物（Round 6 之後）
-                    if (!state.indicatorsAssigned && eventData.round_number >= 6 && state.host.roomId) {
-                        assignIndicators();
-                        state.indicatorsAssigned = true;
+        function applyStateSnapshot(payload, newVersion, polledPlayerId) {
+            state.pollVersion = newVersion;
+            if (!payload) return;
+
+            // Room summary
+            if (payload.room) {
+                const room = payload.room;
+                document.getElementById('roomStatus').textContent = room.status;
+                document.getElementById('currentRound').textContent = room.current_round;
+                document.getElementById('playerCount').textContent = room.player_count;
+                state.host.currentRoundNumber = room.current_round;
+
+                document.getElementById('btnStartGame').disabled = room.status !== 'WAITING';
+                document.getElementById('btnNextRound').disabled = room.status !== 'PLAYING';
+                document.getElementById('btnEndGame').disabled = room.status === 'FINISHED';
+                document.getElementById('btnAssignIndicators').disabled = room.current_round < 6;
+            }
+
+            // Player list
+            if (Array.isArray(payload.players)) {
+                payload.players.forEach(p => {
+                    if (p.player_id === state.player1.playerId) {
+                        state.player1.displayName = p.display_name;
                     }
-                    break;
+                    if (p.player_id === state.player2.playerId) {
+                        state.player2.displayName = p.display_name;
+                    }
+                });
+            }
 
-                case 'MESSAGE_PHASE':
-                    logWS('💬 Message phase activated');
-                    break;
+            // Round info
+            if (payload.round) {
+                const round = payload.round;
+                state.host.currentRoundNumber = round.round_number;
+                state.player1.currentRound = round.round_number;
+                state.player2.currentRound = round.round_number;
 
-                case 'INDICATORS_ASSIGNED':
-                    logWS('🎯 Indicators assigned');
-                    if (state.player1.playerId) getIndicator(1);
-                    if (state.player2.playerId) getIndicator(2);
-                    break;
+                document.getElementById('roundControlInfo').style.display = 'block';
+                document.getElementById('roundControlNumber').textContent = round.round_number;
+                document.getElementById('roundControlStatus').textContent = round.status;
 
-                case 'GAME_ENDED':
-                    logWS('🏁 Game ended!');
-                    updateRoomStatus();
-                    document.getElementById('btnNextRound').disabled = true;
-                    document.getElementById('btnEndGame').disabled = true;
-                    // Auto-fetch game summary
-                    setTimeout(getGameSummary, 500);
-                    break;
+                state.roundProgress = {
+                    submitted: round.submitted_actions || 0,
+                    total: round.total_players || 0
+                };
+                updateProgressBar();
+
+                const waitingVisible = round.status === 'ready_to_publish';
+                document.getElementById('p1Waiting').style.display = waitingVisible ? 'block' : 'none';
+                document.getElementById('p2Waiting').style.display = waitingVisible ? 'block' : 'none';
+
+                document.getElementById('btnPublishRound').disabled = round.status !== 'ready_to_publish';
+                document.getElementById('btnSkipRound').disabled = !['waiting_actions', 'ready_to_publish'].includes(round.status);
+
+                if (round.status === 'completed') {
+                    if (state.player1.playerId) getResult(1);
+                    if (state.player2.playerId) getResult(2);
+                }
+            }
+
+            // Message (personalized)
+            if (payload.message && polledPlayerId) {
+                if (polledPlayerId === state.player1.playerId) {
+                    document.getElementById('p1MessageContent').textContent = payload.message.content;
+                    document.getElementById('p1MessageReceived').style.display = 'block';
+                }
+                if (polledPlayerId === state.player2.playerId) {
+                    document.getElementById('p2MessageContent').textContent = payload.message.content;
+                    document.getElementById('p2MessageReceived').style.display = 'block';
+                }
+            }
+
+            // Indicators
+            if (payload.indicators_assigned) {
+                state.indicatorsAssigned = true;
+                if (payload.indicator_symbol && polledPlayerId) {
+                    if (polledPlayerId === state.player1.playerId) {
+                        document.getElementById('p1Indicator').textContent = payload.indicator_symbol;
+                        document.getElementById('p1IndicatorInfo').style.display = 'block';
+                    }
+                    if (polledPlayerId === state.player2.playerId) {
+                        document.getElementById('p2Indicator').textContent = payload.indicator_symbol;
+                        document.getElementById('p2IndicatorInfo').style.display = 'block';
+                    }
+                }
             }
         }
 
@@ -830,19 +812,9 @@
             const { submitted, total } = state.roundProgress;
             const percentage = total > 0 ? (submitted / total * 100) : 0;
             const progressFill = document.getElementById('progressFill');
-
             if (progressFill) {
                 progressFill.style.width = `${percentage}%`;
                 progressFill.textContent = `${submitted}/${total}`;
-            }
-        }
-
-        function updateRoundControlUI() {
-            const infoEl = document.getElementById('roundControlInfo');
-            if (state.host.currentRoundNumber) {
-                infoEl.style.display = 'block';
-                document.getElementById('roundControlNumber').textContent = state.host.currentRoundNumber;
-                document.getElementById('btnSkipRound').disabled = false;
             }
         }
 
@@ -852,12 +824,7 @@
             const badge = document.querySelector(`[data-step="${step}"]`);
             if (!badge) return;
             badge.className = `badge badge-${status}`;
-            const textMap = {
-                pending: '待執行',
-                running: '執行中',
-                done: '完成',
-                error: '失敗'
-            };
+            const textMap = { pending: '待執行', running: '執行中', done: '完成', error: '失敗' };
             badge.textContent = textMap[status] || status;
         }
 
@@ -865,7 +832,7 @@
             Object.keys(state.flowStatus).forEach(step => setFlowStatus(step, 'pending'));
             state.flowIndex = 0;
             updateFlowCurrent();
-            logWS('快速流程狀態已重置');
+            logEvent('快速流程狀態已重置');
         }
 
         function updateFlowCurrent() {
@@ -876,38 +843,12 @@
         }
 
         // ============================================
-        // Logging
-        // ============================================
-        function logWS(message, type = 'ws-event') {
-            const logEl = document.getElementById('wsLog');
-            const timestamp = new Date().toLocaleTimeString();
-            const entry = document.createElement('div');
-            entry.className = `log-entry ${type}`;
-            entry.textContent = `[${timestamp}] ${message}`;
-            logEl.appendChild(entry);
-            logEl.scrollTop = logEl.scrollHeight;
-        }
-
-        function logAPI(message, type = 'api-call') {
-            console.log(`[API] ${message}`);
-        }
-
-        function delay(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-        }
-
-        // ============================================
         // Host Functions
         // ============================================
         async function createRoom() {
             try {
                 logAPI('POST /rooms');
-                const response = await fetch(`${API_BASE}/rooms`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
-                });
-
+                const response = await fetch(`${API_BASE}/rooms`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
                 const data = await response.json();
 
                 state.host.roomId = data.room_id;
@@ -919,26 +860,23 @@
                 document.getElementById('hostPlayerId').textContent = data.host_player_id;
                 document.getElementById('hostInfo').style.display = 'block';
 
-                // Auto-fill room codes for players
                 document.getElementById('p1RoomCode').value = data.code;
                 document.getElementById('p2RoomCode').value = data.code;
 
                 document.getElementById('btnStartGame').disabled = false;
-                document.getElementById('btnAssignIndicators').disabled = false;
+                // Round < 6 時不可分配指示物，等待輪詢後由狀態控制
+                document.getElementById('btnAssignIndicators').disabled = true;
 
-                // Connect WebSocket
-                connectWebSocket(data.room_id);
-
-                logWS(`Room created: ${data.code}`, 'success');
-
-                // 啟用快速按鈕
                 document.getElementById('btnFillRoom').disabled = false;
                 document.getElementById('btnQuickJoin').disabled = false;
                 document.getElementById('btnQuickSubmit').disabled = false;
+
+                startPolling();
+                logEvent(`房間建立: ${data.code}`, 'success');
                 setFlowStatus('createRoom', 'done');
                 return data;
             } catch (error) {
-                logWS(`Failed to create room: ${error.message}`, 'error');
+                logEvent(`Failed to create room: ${error.message}`, 'error');
                 setFlowStatus('createRoom', 'error');
                 return null;
             }
@@ -946,23 +884,19 @@
 
         async function startGame() {
             if (!state.host.roomId) return;
-
             try {
                 logAPI('POST /rooms/{room_id}/start');
-                const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/start`, {
-                    method: 'POST'
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
+                const res = await fetch(`${API_BASE}/rooms/${state.host.roomId}/start`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
                 }
-
-                logWS('Game start request sent', 'success');
+                logEvent('Game start requested', 'success');
                 setFlowStatus('startGame', 'done');
+                await fetchLatestState(true);
                 return true;
             } catch (error) {
-                logWS(`Failed to start game: ${error.message}`, 'error');
+                logEvent(`Failed to start game: ${error.message}`, 'error');
                 setFlowStatus('startGame', 'error');
                 return false;
             }
@@ -970,110 +904,92 @@
 
         async function nextRound() {
             if (!state.host.roomId) return;
-
             try {
                 logAPI('POST /rooms/{room_id}/rounds/next');
-                const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/rounds/next`, {
-                    method: 'POST'
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
+                const res = await fetch(`${API_BASE}/rooms/${state.host.roomId}/rounds/next`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
                 }
-
-                const data = await response.json();
-                logWS(`Next round request sent: Round ${data.round_number}`, 'success');
+                const data = await res.json();
+                logEvent(`Next round request sent: Round ${data.round_number}`, 'success');
                 setFlowStatus('nextRound', 'done');
+                await fetchLatestState(true);
                 return data;
             } catch (error) {
-                logWS(`Failed to start next round: ${error.message}`, 'error');
+                logEvent(`Failed to start next round: ${error.message}`, 'error');
                 setFlowStatus('nextRound', 'error');
                 return null;
             }
         }
 
         async function publishRoundResults() {
-            if (!state.host.roomId || !state.host.currentRoundNumber) return;
-
-            if (!confirm(`Publish results for Round ${state.host.currentRoundNumber}?`)) {
-                return;
-            }
-
+            const roundNumber = state.host.currentRoundNumber;
+            if (!state.host.roomId || !roundNumber) return;
+            if (!confirm(`Publish results for Round ${roundNumber}?`)) return;
             try {
-                logAPI(`POST /rooms/{room_id}/rounds/${state.host.currentRoundNumber}/publish`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${state.host.roomId}/rounds/${state.host.currentRoundNumber}/publish`,
-                    { method: 'POST' }
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
+                // 先確定狀態已 ready_to_publish
+                await fetchLatestState(true);
+                const currentStatus = document.getElementById('roundControlStatus').textContent || '';
+                if (currentStatus.toLowerCase() !== 'ready_to_publish') {
+                    logEvent(`Round ${roundNumber} 尚未 ready_to_publish（目前 ${currentStatus || '未知'}）`, 'error');
+                    return false;
                 }
 
-                logWS(`Round ${state.host.currentRoundNumber} results published`, 'success');
-                setFlowStatus('publish', 'done');
+                logAPI(`POST /rooms/{room_id}/rounds/${roundNumber}/publish`);
+                const res = await fetch(`${API_BASE}/rooms/${state.host.roomId}/rounds/${roundNumber}/publish`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
+                }
+                logEvent(`Round ${roundNumber} results published`, 'success');
+                await fetchLatestState(true);
                 return true;
             } catch (error) {
-                logWS(`Failed to publish results: ${error.message}`, 'error');
-                setFlowStatus('publish', 'error');
+                logEvent(`Failed to publish results: ${error.message}`, 'error');
                 return false;
             }
         }
 
         async function skipRound() {
-            if (!state.host.roomId || !state.host.currentRoundNumber) return;
-
-            if (!confirm(`Skip Round ${state.host.currentRoundNumber}? Unsubmitted players will auto-choose TURN.`)) {
-                return;
-            }
-
+            const roundNumber = state.host.currentRoundNumber;
+            if (!state.host.roomId || !roundNumber) return;
+            if (!confirm(`Skip Round ${roundNumber}? 未提交的玩家會自動 TURN。`)) return;
             try {
-                logAPI(`POST /rooms/{room_id}/rounds/${state.host.currentRoundNumber}/skip`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${state.host.roomId}/rounds/${state.host.currentRoundNumber}/skip`,
-                    { method: 'POST' }
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
+                logAPI(`POST /rooms/{room_id}/rounds/${roundNumber}/skip`);
+                const res = await fetch(`${API_BASE}/rooms/${state.host.roomId}/rounds/${roundNumber}/skip`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
                 }
-
-                logWS(`Round ${state.host.currentRoundNumber} skipped`, 'success');
+                logEvent(`Round ${roundNumber} skipped`, 'success');
+                await fetchLatestState(true);
             } catch (error) {
-                logWS(`Failed to skip round: ${error.message}`, 'error');
+                logEvent(`Failed to skip round: ${error.message}`, 'error');
             }
         }
 
         async function endGame() {
             if (!state.host.roomId) return;
-
             try {
                 logAPI('POST /rooms/{room_id}/end');
-                const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/end`, {
-                    method: 'POST'
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
+                const res = await fetch(`${API_BASE}/rooms/${state.host.roomId}/end`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail);
                 }
-
-                logWS('Game end request sent', 'success');
+                logEvent('Game end request sent', 'success');
+                await fetchLatestState(true);
             } catch (error) {
-                logWS(`Failed to end game: ${error.message}`, 'error');
+                logEvent(`Failed to end game: ${error.message}`, 'error');
             }
         }
 
         async function updateRoomStatus() {
             if (!state.host.code) return;
-
             try {
                 const response = await fetch(`${API_BASE}/rooms/${state.host.code}`);
                 const data = await response.json();
-
                 document.getElementById('roomStatus').textContent = data.status.toUpperCase();
                 document.getElementById('currentRound').textContent = data.current_round;
                 document.getElementById('playerCount').textContent = data.player_count;
@@ -1084,21 +1000,21 @@
 
         async function assignIndicators() {
             if (!state.host.roomId) return;
-
+            if ((state.host.currentRoundNumber || 0) < 6) {
+                logEvent('指示物只能在第 6 回合後分配，請先推進到 Round 6 並公布結果', 'error');
+                return;
+            }
             try {
                 logAPI('POST /rooms/{room_id}/indicators/assign');
-                const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/indicators/assign`, {
-                    method: 'POST'
-                });
-
+                const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/indicators/assign`, { method: 'POST' });
                 if (!response.ok) {
                     const error = await response.json();
                     throw new Error(error.detail);
                 }
-
-                logWS('Indicators assigned', 'success');
+                logEvent('Indicators assigned', 'success');
+                await fetchLatestState(true);
             } catch (error) {
-                logWS(`Failed to assign indicators: ${error.message}`, 'error');
+                logEvent(`Failed to assign indicators: ${error.message}`, 'error');
             }
         }
 
@@ -1108,42 +1024,23 @@
         async function joinRoom(playerNum) {
             const nickname = document.getElementById(`p${playerNum}Nickname`).value;
             const roomCode = document.getElementById(`p${playerNum}RoomCode`).value;
-
-            if (!nickname || !roomCode) {
-                alert('Please enter nickname and room code');
-                return;
-            }
-
+            if (!nickname || !roomCode) { alert('Please enter nickname and room code'); return; }
             try {
                 logAPI(`POST /rooms/${roomCode}/join`);
-                const response = await fetch(`${API_BASE}/rooms/${roomCode}/join`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ nickname })
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
-                const data = await response.json();
-
+                const res = await fetch(`${API_BASE}/rooms/${roomCode}/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nickname }) });
+                if (!res.ok) { const err = await res.json(); throw new Error(err.detail); }
+                const data = await res.json();
                 state[`player${playerNum}`].roomId = data.room_id;
                 state[`player${playerNum}`].playerId = data.player_id;
                 state[`player${playerNum}`].displayName = data.display_name;
-
                 document.getElementById(`p${playerNum}PlayerId`).textContent = data.player_id;
                 document.getElementById(`p${playerNum}DisplayName`).textContent = data.display_name;
                 document.getElementById(`p${playerNum}Info`).style.display = 'block';
-
-                logWS(`Player ${playerNum} joined: ${data.display_name}`, 'success');
-
-                // Update room status
-                updateRoomStatus();
+                logEvent(`Player ${playerNum} joined: ${data.display_name}`, 'success');
+                await fetchLatestState(true);
                 return true;
             } catch (error) {
-                logWS(`Player ${playerNum} failed to join: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to join: ${error.message}`, 'error');
                 return false;
             }
         }
@@ -1151,64 +1048,36 @@
         async function getRoundInfo(playerNum) {
             const roomId = state[`player${playerNum}`].roomId;
             if (!roomId) return;
-
             try {
                 logAPI('GET /rooms/{room_id}/rounds/current');
-                const response = await fetch(`${API_BASE}/rooms/${roomId}/rounds/current`);
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
-                const data = await response.json();
-
+                const res = await fetch(`${API_BASE}/rooms/${roomId}/rounds/current`);
+                if (!res.ok) { const err = await res.json(); throw new Error(err.detail); }
+                const data = await res.json();
                 state[`player${playerNum}`].currentRound = data.round_number;
-
                 document.getElementById(`p${playerNum}RoundNumber`).textContent = data.round_number;
                 document.getElementById(`p${playerNum}Phase`).textContent = data.phase;
                 document.getElementById(`p${playerNum}RoundStatus`).textContent = data.status;
                 document.getElementById(`p${playerNum}RoundInfo`).style.display = 'block';
-
                 const waitingEl = document.getElementById(`p${playerNum}Waiting`);
-                // READY_TO_PUBLISH 時顯示等待提示，其他狀態關閉
-                if (data.status === 'ready_to_publish') {
-                    waitingEl.style.display = 'block';
-                } else {
-                    waitingEl.style.display = 'none';
-                }
-                // 若已結束但尚未拿到結果，幫忙自動拉一次
-                if (data.status === 'completed') {
-                    await getResult(playerNum);
-                }
-
-                logWS(`Player ${playerNum} round info updated`, 'success');
+                waitingEl.style.display = data.status === 'ready_to_publish' ? 'block' : 'none';
+                if (data.status === 'completed') await getResult(playerNum);
+                logEvent(`Player ${playerNum} round info updated`, 'success');
             } catch (error) {
-                logWS(`Player ${playerNum} failed to get round info: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to get round info: ${error.message}`, 'error');
             }
         }
 
-        // ============================================
-        // Quick helpers for testing (auto-fill / auto-join / auto-action)
-        // ============================================
         function fillRoomCode() {
-            if (!state.host.code) {
-                alert('請先建立房間');
-                return;
-            }
+            if (!state.host.code) { alert('請先建立房間'); return; }
             document.getElementById('p1RoomCode').value = state.host.code;
             document.getElementById('p2RoomCode').value = state.host.code;
-            logWS(`已套用房號 ${state.host.code} 到兩位玩家`, 'success');
+            logEvent(`已套用房號 ${state.host.code} 到兩位玩家`, 'success');
         }
 
         async function quickJoinPlayers() {
-            if (!state.host.code) {
-                alert('請先建立房間');
-                return;
-            }
+            if (!state.host.code) { alert('請先建立房間'); return; }
             document.getElementById('p1RoomCode').value = state.host.code;
             document.getElementById('p2RoomCode').value = state.host.code;
-            // 使用預設暱稱 Alice / Bob
             const r1 = await joinRoom(1);
             const r2 = await joinRoom(2);
             if (r1 && r2) {
@@ -1221,93 +1090,34 @@
         }
 
         async function quickSubmitChoices() {
-            // 需先取得回合資訊
-            await getRoundInfo(1);
-            await getRoundInfo(2);
+            await getRoundInfo(1); await getRoundInfo(2);
             await submitAction(1, 'ACCELERATE');
             await submitAction(2, 'TURN');
         }
 
-        // ============================================
-        // Flow runner (顯示目前步驟並觸發對應動作)
-        // ============================================
+        // Flow runner
         async function runFlowStep(step) {
             try {
                 setFlowStatus(step, 'running');
                 let result = true;
                 switch (step) {
-                    case 'createRoom':
-                        result = await createRoom();
-                        break;
-                    case 'joinPlayers':
-                        result = await quickJoinPlayers();
-                        break;
-                    case 'startGame':
-                        result = await startGame();
-                        break;
-                    case 'round1Info':
-                        await getRoundInfo(1);
-                        await getPair(1);
-                        await getRoundInfo(2);
-                        await getPair(2);
-                        break;
-                    case 'round2Info':
-                    case 'round5Info':
-                    case 'round6Info':
-                        await getRoundInfo(1);
-                        await getRoundInfo(2);
-                        break;
-                    case 'round1Actions':
-                        await submitAction(1, 'ACCELERATE');
-                        await submitAction(2, 'TURN');
-                        break;
-                    case 'round2Actions':
-                        await submitAction(1, 'TURN');
-                        await submitAction(2, 'ACCELERATE');
-                        break;
-                    case 'round5Actions':
-                        await submitAction(1, 'ACCELERATE');
-                        await submitAction(2, 'TURN');
-                        break;
-                    case 'round5Message':
-                        setDefaultMessage(1, 'Hi! 下一輪合作嗎？');
-                        setDefaultMessage(2, '好啊，我們合作！');
-                        await sendMessage(1);
-                        await sendMessage(2);
-                        await getMessage(1);
-                        await getMessage(2);
-                        break;
-                    case 'round1Publish':
-                    case 'round2Publish':
-                    case 'round5Publish':
-                        result = await publishRoundResults();
-                        break;
-                    case 'toRound2':
-                    case 'toRound6':
-                        result = await nextRound();
-                        break;
-                    case 'pushToRound5':
-                        while ((state.host.currentRoundNumber || 0) < 5) {
-                            await nextRound();
-                            await delay(200);
-                        }
-                        break;
-                    case 'round6Actions':
-                        await submitAction(1, 'TURN');
-                        await submitAction(2, 'ACCELERATE');
-                        break;
-                    case 'round6Publish':
-                        await publishRoundResults();
-                        await assignIndicators();
-                        if (state.player1.playerId) await getIndicator(1);
-                        if (state.player2.playerId) await getIndicator(2);
-                        break;
+                    case 'createRoom': result = await createRoom(); break;
+                    case 'joinPlayers': result = await quickJoinPlayers(); break;
+                    case 'startGame': result = await startGame(); break;
+                    case 'round1Info': await getRoundInfo(1); await getPair(1); await getRoundInfo(2); await getPair(2); break;
+                    case 'round2Info': case 'round5Info': case 'round6Info': await getRoundInfo(1); await getRoundInfo(2); break;
+                    case 'round1Actions': await submitAction(1, 'ACCELERATE'); await submitAction(2, 'TURN'); break;
+                    case 'round2Actions': await submitAction(1, 'TURN'); await submitAction(2, 'ACCELERATE'); break;
+                    case 'round5Actions': await submitAction(1, 'ACCELERATE'); await submitAction(2, 'TURN'); break;
+                    case 'round5Message': setDefaultMessage(1, 'Hi! 下一輪合作嗎？'); setDefaultMessage(2, '好啊，我們合作！'); await sendMessage(1); await sendMessage(2); await getMessage(1); await getMessage(2); break;
+                    case 'round1Publish': case 'round2Publish': case 'round5Publish': result = await publishRoundResults(); break;
+                    case 'toRound2': case 'toRound6': result = await nextRound(); break;
+                    case 'pushToRound5': while ((state.host.currentRoundNumber || 0) < 5) { await nextRound(); await delay(200); } break;
+                    case 'round6Actions': await submitAction(1, 'TURN'); await submitAction(2, 'ACCELERATE'); break;
+                    case 'round6Publish': await publishRoundResults(); await assignIndicators(); if (state.player1.playerId) await getIndicator(1); if (state.player2.playerId) await getIndicator(2); break;
                 }
-                if (result === false || result === null) {
-                    throw new Error('step failed');
-                }
+                if (result === false || result === null) throw new Error('step failed');
                 setFlowStatus(step, 'done');
-                // 自動推進指標
                 const nextIndex = flowSequence.findIndex(s => s.key === step) + 1;
                 state.flowIndex = nextIndex;
                 updateFlowCurrent();
@@ -1318,10 +1128,7 @@
         }
 
         async function runNextFlowStep() {
-            if (state.flowIndex >= flowSequence.length) {
-                logWS('所有流程已完成');
-                return;
-            }
+            if (state.flowIndex >= flowSequence.length) { logEvent('所有流程已完成'); return; }
             const step = flowSequence[state.flowIndex];
             await runFlowStep(step.key);
         }
@@ -1330,32 +1137,18 @@
             const roomId = state[`player${playerNum}`].roomId;
             const playerId = state[`player${playerNum}`].playerId;
             const roundNumber = state[`player${playerNum}`].currentRound;
-
-            if (!roomId || !playerId || !roundNumber) {
-                alert('Please get round info first');
-                return;
-            }
-
+            if (!roomId || !playerId || !roundNumber) { alert('Please get round info first'); return; }
             try {
                 logAPI(`GET /rooms/{room_id}/rounds/${roundNumber}/pair`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/pair?player_id=${playerId}`
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                const response = await fetch(`${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/pair?player_id=${playerId}`);
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 const data = await response.json();
-
                 document.getElementById(`p${playerNum}OpponentName`).textContent = data.opponent_display_name;
                 document.getElementById(`p${playerNum}PairInfo`).style.display = 'block';
                 state.firstPairFetched[playerNum === 1 ? 'p1' : 'p2'] = true;
-
-                logWS(`Player ${playerNum} opponent: ${data.opponent_display_name}`, 'success');
+                logEvent(`Player ${playerNum} opponent: ${data.opponent_display_name}`, 'success');
             } catch (error) {
-                logWS(`Player ${playerNum} failed to get pair: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to get pair: ${error.message}`, 'error');
             }
         }
 
@@ -1364,34 +1157,15 @@
             const playerId = state[`player${playerNum}`].playerId;
             const roundNumber = state[`player${playerNum}`].currentRound;
             const choiceValue = choice.toUpperCase();
-
-            if (!roomId || !playerId || !roundNumber) {
-                alert('Please get round info first');
-                return;
-            }
-
+            if (!roomId || !playerId || !roundNumber) { alert('Please get round info first'); return; }
             try {
                 logAPI(`POST /rooms/{room_id}/rounds/${roundNumber}/action`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/action`,
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            player_id: playerId,
-                            choice: choiceValue
-                        })
-                    }
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
-                logWS(`Player ${playerNum} chose: ${choiceValue}`, 'success');
+                const res = await fetch(`${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ player_id: playerId, choice: choiceValue }) });
+                if (!res.ok) { const err = await res.json(); throw new Error(err.detail); }
+                logEvent(`Player ${playerNum} chose: ${choiceValue}`, 'success');
+                await fetchLatestState(true);
             } catch (error) {
-                logWS(`Player ${playerNum} failed to submit action: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to submit action: ${error.message}`, 'error');
             }
         }
 
@@ -1399,25 +1173,12 @@
             const roomId = state[`player${playerNum}`].roomId;
             const playerId = state[`player${playerNum}`].playerId;
             const roundNumber = state[`player${playerNum}`].currentRound;
-
-            if (!roomId || !playerId || !roundNumber) {
-                alert('Please get round info first');
-                return;
-            }
-
+            if (!roomId || !playerId || !roundNumber) { alert('Please get round info first'); return; }
             try {
                 logAPI(`GET /rooms/{room_id}/rounds/${roundNumber}/result`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/result?player_id=${playerId}`
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                const response = await fetch(`${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/result?player_id=${playerId}`);
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 const data = await response.json();
-
                 const resultBox = document.createElement('div');
                 resultBox.className = 'result-box';
                 resultBox.innerHTML = `
@@ -1429,13 +1190,11 @@
                         <strong>Your Payoff:</strong> ${data.your_payoff}
                     </div>
                 `;
-
                 const resultsContainer = document.getElementById(`p${playerNum}Results`);
                 resultsContainer.insertBefore(resultBox, resultsContainer.firstChild);
-
-                logWS(`Player ${playerNum} got result for round ${roundNumber}`, 'success');
+                logEvent(`Player ${playerNum} got result for round ${roundNumber}`, 'success');
             } catch (error) {
-                logWS(`Player ${playerNum} failed to get result: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to get result: ${error.message}`, 'error');
             }
         }
 
@@ -1444,157 +1203,88 @@
             const playerId = state[`player${playerNum}`].playerId;
             const roundNumber = state[`player${playerNum}`].currentRound;
             const content = document.getElementById(`p${playerNum}Message`).value;
-
-            if (!roomId || !playerId || !roundNumber) {
-                alert('Please get round info first');
-                return;
-            }
-
-            if (!content) {
-                alert('Please enter a message');
-                return;
-            }
-
+            if (!roomId || !playerId || !roundNumber) { alert('Please get round info first'); return; }
+            if (!content) { alert('Please enter a message'); return; }
             try {
                 logAPI(`POST /rooms/{room_id}/rounds/${roundNumber}/message`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/message`,
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            sender_id: playerId,
-                            content: content
-                        })
-                    }
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                const response = await fetch(`${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sender_id: playerId, content }) });
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 document.getElementById(`p${playerNum}Message`).value = '';
-                logWS(`Player ${playerNum} sent message`, 'success');
+                logEvent(`Player ${playerNum} sent message`, 'success');
+                await fetchLatestState(true);
             } catch (error) {
-                logWS(`Player ${playerNum} failed to send message: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to send message: ${error.message}`, 'error');
             }
         }
 
         function setDefaultMessage(playerNum, text) {
             const box = document.getElementById(`p${playerNum}Message`);
-            if (box && !box.value) {
-                box.value = text;
-            }
+            if (box && !box.value) box.value = text;
         }
 
         async function getMessage(playerNum) {
             const roomId = state[`player${playerNum}`].roomId;
             const playerId = state[`player${playerNum}`].playerId;
             const roundNumber = state[`player${playerNum}`].currentRound;
-
-            if (!roomId || !playerId || !roundNumber) {
-                alert('Please get round info first');
-                return;
-            }
-
+            if (!roomId || !playerId || !roundNumber) { alert('Please get round info first'); return; }
             try {
                 logAPI(`GET /rooms/{room_id}/rounds/${roundNumber}/message`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/message?player_id=${playerId}`
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                const response = await fetch(`${API_BASE}/rooms/${roomId}/rounds/${roundNumber}/message?player_id=${playerId}`);
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 const data = await response.json();
-
                 document.getElementById(`p${playerNum}MessageContent`).textContent = data.content;
                 document.getElementById(`p${playerNum}MessageReceived`).style.display = 'block';
-
-                logWS(`Player ${playerNum} received message`, 'success');
+                logEvent(`Player ${playerNum} received message`, 'success');
             } catch (error) {
-                logWS(`Player ${playerNum} failed to get message: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to get message: ${error.message}`, 'error');
             }
         }
 
         async function getIndicator(playerNum) {
             const roomId = state[`player${playerNum}`].roomId;
             const playerId = state[`player${playerNum}`].playerId;
-
-            if (!roomId || !playerId) {
-                alert('Please join room first');
-                return;
-            }
-
+            if (!roomId || !playerId) { alert('Please join room first'); return; }
             try {
                 logAPI(`GET /rooms/{room_id}/indicator`);
-                const response = await fetch(
-                    `${API_BASE}/rooms/${roomId}/indicator?player_id=${playerId}`
-                );
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                const response = await fetch(`${API_BASE}/rooms/${roomId}/indicator?player_id=${playerId}`);
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 const data = await response.json();
-
                 document.getElementById(`p${playerNum}Indicator`).textContent = data.symbol;
                 document.getElementById(`p${playerNum}IndicatorInfo`).style.display = 'block';
-
-                logWS(`Player ${playerNum} indicator: ${data.symbol}`, 'success');
+                logEvent(`Player ${playerNum} indicator: ${data.symbol}`, 'success');
             } catch (error) {
-                logWS(`Player ${playerNum} failed to get indicator: ${error.message}`, 'error');
+                logEvent(`Player ${playerNum} failed to get indicator: ${error.message}`, 'error');
             }
         }
 
         async function getGameSummary() {
             if (!state.host.roomId) return;
-
             try {
                 logAPI('GET /rooms/{room_id}/summary');
                 const response = await fetch(`${API_BASE}/rooms/${state.host.roomId}/summary`);
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail);
-                }
-
+                if (!response.ok) { const error = await response.json(); throw new Error(error.detail); }
                 const data = await response.json();
-
-                // Build summary HTML
                 let html = '<div class="result-box"><h4>🏆 Game Summary</h4>';
-
-                // Rankings
                 html += '<h5 style="color: #00ffff; margin: 15px 0 10px 0;">Rankings</h5>';
                 data.players.forEach((player, index) => {
                     const rankEmoji = index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉';
                     const payoffClass = player.total_payoff >= 0 ? 'payoff-positive' : 'payoff-negative';
-                    html += `<div style="margin: 5px 0;">
-                        ${rankEmoji} <strong>${player.display_name}</strong>:
-                        <span class="${payoffClass}">${player.total_payoff}</span>
-                    </div>`;
+                    html += `<div style="margin: 5px 0;">${rankEmoji} <strong>${player.display_name}</strong>: <span class="${payoffClass}">${player.total_payoff}</span></div>`;
                 });
-
-                // Stats
                 html += '<h5 style="color: #00ffff; margin: 15px 0 10px 0;">Strategy Statistics</h5>';
-                html += `<div style="margin: 5px 0;">
-                    ⚡ Accelerate: <span class="info-value">${(data.stats.accelerate_ratio * 100).toFixed(1)}%</span>
-                </div>`;
-                html += `<div style="margin: 5px 0;">
-                    🔄 Turn: <span class="info-value">${(data.stats.turn_ratio * 100).toFixed(1)}%</span>
-                </div>`;
-
+                html += `<div style="margin: 5px 0;">⚡ Accelerate: <span class="info-value">${(data.stats.accelerate_ratio * 100).toFixed(1)}%</span></div>`;
+                html += `<div style="margin: 5px 0;">🔄 Turn: <span class="info-value">${(data.stats.turn_ratio * 100).toFixed(1)}%</span></div>`;
                 html += '</div>';
-
                 document.getElementById('gameSummary').innerHTML = html;
-                logWS('Game summary loaded', 'success');
+                logEvent('Game summary loaded', 'success');
             } catch (error) {
-                logWS(`Failed to get game summary: ${error.message}`, 'error');
+                logEvent(`Failed to get game summary: ${error.message}`, 'error');
             }
+        }
+
+        // Helpers
+        async function fetchLatestState(forceFull = false) {
+            await pollState(forceFull);
         }
 
         // ============================================
@@ -1619,8 +1309,9 @@
 
         renderFlowList();
         updateFlowCurrent();
-        logWS('測試控台 v2.0 初始化（支援延遲公布）');
-        logWS('請先點「建立房間」開始流程或用快速步驟的「下一步」');
+        logEvent('測試控台 v2.1 初始化（短輪詢版）');
+        logEvent('請先點「建立房間」開始流程或用快速步驟的「下一步」');
     </script>
+
 </body>
 </html>

@@ -115,6 +115,58 @@ class IndicatorResponse(BaseModel):
         from_attributes = True
 
 
+# State (short polling) schemas
+class PlayerStatePayload(BaseModel):
+    player_id: str
+    display_name: str
+    is_host: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class RoundStatePayload(BaseModel):
+    round_number: int
+    phase: RoundPhase
+    status: RoundStatus
+    submitted_actions: int
+    total_players: int
+    your_choice: Optional[Choice] = None
+    opponent_choice: Optional[Choice] = None
+    your_payoff: Optional[int] = None
+    opponent_payoff: Optional[int] = None
+    opponent_display_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class MessageStatePayload(BaseModel):
+    round_number: int
+    content: str
+    from_player_id: str
+    from_display_name: str
+
+    class Config:
+        from_attributes = True
+
+
+class RoomStatePayload(BaseModel):
+    room: RoomStatusResponse
+    players: list[PlayerStatePayload]
+    round: Optional[RoundStatePayload] = None
+    indicator_symbol: Optional[str] = None
+    indicators_assigned: bool = False
+    message: Optional[MessageStatePayload] = None
+    version: int
+
+
+class RoomStateResponse(BaseModel):
+    version: int
+    has_update: bool
+    data: Optional[RoomStatePayload] = None
+
+
 # Summary schemas
 class GameStats(BaseModel):
     accelerate_ratio: float

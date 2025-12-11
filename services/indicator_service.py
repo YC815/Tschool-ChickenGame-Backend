@@ -1,61 +1,70 @@
 """
 指標服務：分配和管理玩家指標（Round 7 之後使用）
 
-指標用途：
-- Round 7-10 時，玩家可以看到對手的指標（而不是真實身份）
-- 增加遊戲的匿名性和策略性
+需求：指標要以 Round 1 的配對為單位，同一組配對使用同一個符號，
+方便玩家實體配對（兩人拿到同樣符號）。
 """
 import random
 
 from sqlalchemy.orm import Session
 
-from models import Player, Indicator
+from models import Player, Indicator, Round, Pair
 
 
 def assign_indicators(room_id: str, db: Session) -> None:
     """
-    為房間內所有玩家分配指標符號
+    為房間內所有玩家分配指標符號（依 Round1 配對，一組一符號）
 
     邏輯：
-    - 有 4 種符號：🍋 🍎 🍇 🍊
-    - 玩家隨機洗牌後依序分配
-    - 如果玩家超過 4 人，符號會重複（例如：2 個 🍋, 2 個 🍎, ...）
+    - 先找到 Round 1 的配對列表
+    - 依序為每個配對指定同一個符號
+    - 符號集輪替使用（🍋 🍎 🍇 🍊），配對數大於符號數則重複循環
 
     參數：
         room_id: 房間 ID
         db: SQLAlchemy Session
 
-    副作用：
-        在資料庫中建立 Indicator 記錄
-
-    範例：
-        4 位玩家: 每人一個不同符號
-        8 位玩家: 每個符號各 2 人
-        6 位玩家: 2 個符號各 2 人，2 個符號各 1 人
+    異常：
+        ValueError: 沒有找到 Round 1 或配對
     """
-    symbols = ["🍋", "🍎", "🍇", "🍊"]
+    symbols = [
+        "🍋", "🍎", "🍇", "🍊", "🍉", "🍌", "🍒", "🍓",
+        "🍍", "🥝", "🥑", "🫐", "🥥", "🍑", "🍐", "🥕",
+        "🥔", "🌽", "🍆", "🥦", "🌶️", "🧄", "🧅", "🍞",
+        "🧀", "🍗", "🍖", "🍤", "🍣", "🍪", "🍿", "🥨"
+    ]
 
-    # 1. 取得房間內所有非 Host 玩家
-    players = db.query(Player).filter(
-        Player.room_id == room_id,
-        Player.is_host == False
-    ).all()
+    # 1) 找 Round 1
+    round1 = db.query(Round).filter(
+        Round.room_id == room_id,
+        Round.round_number == 1
+    ).first()
+    if not round1:
+        raise ValueError("Round 1 not found for indicator assignment")
 
-    # 2. 隨機洗牌（確保符號分配是隨機的）
-    random.shuffle(players)
+    # 2) 取配對
+    pairs = db.query(Pair).filter(Pair.round_id == round1.id).all()
+    if not pairs:
+        raise ValueError("No pairs found in Round 1 for indicator assignment")
 
-    # 3. 依序分配符號（輪流使用 4 種符號）
-    for i, player in enumerate(players):
-        symbol = symbols[i % len(symbols)]
-        indicator = Indicator(
-            room_id=room_id,
-            player_id=player.id,
-            symbol=symbol
-        )
-        db.add(indicator)
+    # 3) 依配對指派同一符號（盡量不重複，超過池大小才會循環）
+    random.shuffle(symbols)
+    pool = symbols[:]
 
-    # 4. Flush 但不 commit（讓外層 transaction 處理）
-    db.flush()
+    for pair in pairs:
+        if not pool:
+            pool = symbols[:]  # 若配對數 > 符號庫，重新洗牌循環
+            random.shuffle(pool)
+        symbol = pool.pop()
+        for player_id in [pair.player1_id, pair.player2_id]:
+            indicator = Indicator(
+                room_id=room_id,
+                player_id=player_id,
+                symbol=symbol
+            )
+            db.add(indicator)
+
+    db.flush()  # 交由外層 transaction 處理 commit
 
 
 def get_player_indicator(player_id: str, db: Session) -> str:

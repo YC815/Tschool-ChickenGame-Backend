@@ -6,16 +6,15 @@ Room API Endpoints
 2. 參數驗證
 3. 呼叫 RoomManager
 4. 錯誤轉換（業務異常 -> HTTP 異常）
-5. 觸發 WebSocket 通知
+5. 提供短輪詢狀態快照（/state）
 
 不負責：
 - 業務邏輯（由 RoomManager 負責）
 - 狀態轉換（由 StateMachine 負責）
 - 資料驗證（由 Manager 負責）
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-import asyncio
 import logging
 
 from database import get_db
@@ -26,7 +25,8 @@ from schemas import (
     RoomStatusResponse,
     GameSummaryResponse,
     PlayerSummary,
-    GameStats
+    GameStats,
+    RoomStateResponse,
 )
 from core.room_manager import RoomManager
 from core.round_manager import RoundManager
@@ -37,7 +37,7 @@ from core.exceptions import (
     MaxRoundsReached
 )
 from services.payoff_service import calculate_total_payoff
-from api.websocket import broadcast_event, WSEventType
+from services.state_service import build_room_state
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 logger = logging.getLogger(__name__)
@@ -110,8 +110,35 @@ def get_room_status(code: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal error")
 
 
+@router.get("/{room_id}/state", response_model=RoomStateResponse)
+def get_room_state(
+    room_id: str,
+    version: int = Query(0, description="Client-side state_version, 0 for first load"),
+    player_id: str | None = Query(None, description="Optional player id for personalized data"),
+    db: Session = Depends(get_db)
+):
+    """
+    短輪詢 endpoint：返回房間的最新狀態快照
+
+    - 如果 client 傳入的 version 已經是最新，回傳 has_update=false
+    - 如果有更新，返回完整快照（room/players/round/message/indicator）
+    """
+    try:
+        return build_room_state(
+            db,
+            room_id=room_id,
+            client_version=version,
+            player_id=player_id
+        )
+    except RoomNotFound:
+        raise HTTPException(status_code=404, detail="Room not found")
+    except Exception as e:
+        logger.error(f"Failed to build room state: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
 @router.post("/{room_id}/start")
-async def start_game(room_id: str, db: Session = Depends(get_db)):
+def start_game(room_id: str, db: Session = Depends(get_db)):
     """
     開始遊戲（Host endpoint）
 
@@ -122,28 +149,14 @@ async def start_game(room_id: str, db: Session = Depends(get_db)):
     流程：
     1. 呼叫 RoomManager.start_game()
     2. 自動建立第一輪（Round 1）
-    3. 非同步發送 WebSocket 通知（ROOM_STARTED + ROUND_STARTED）
-    4. 返回成功
-
-    注意：
-    - WebSocket 通知是非阻塞的（使用 asyncio.create_task）
-    - 確保 DB commit 完成後才發送通知
-    - 自動建立第一輪，消除 current_round=0 的中間狀態
+    3. 返回成功（前端透過短輪詢 /state 得知變化）
     """
     try:
         # 1. 開始遊戲（業務邏輯）
         RoomManager.start_game(db, room_id)
 
         # 2. 立即建立第一輪（消除 current_round=0 的中間狀態）
-        first_round = RoundManager.create_round(db, room_id)
-
-        # 3. 發送 WebSocket 通知（非阻塞）
-        asyncio.create_task(
-            _notify_room_started(room_id)
-        )
-        asyncio.create_task(
-            _notify_round_started(room_id, first_round.round_number, first_round.phase.value)
-        )
+        RoundManager.create_round(db, room_id)
 
         return {"status": "ok"}
 
@@ -161,18 +174,13 @@ async def start_game(room_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{room_id}/rounds/next")
-async def next_round(room_id: str, db: Session = Depends(get_db)):
+def next_round(room_id: str, db: Session = Depends(get_db)):
     """
     開始下一回合（Host endpoint）
 
     前置條件：
     - 房間狀態必須是 PLAYING
     - 當前回合數 < 10
-
-    流程：
-    1. 呼叫 RoundManager.create_round()
-    2. 非同步發送 WebSocket 通知（ROUND_STARTED）
-    3. 返回回合資訊
 
     返回：
         - status: "ok"
@@ -181,11 +189,6 @@ async def next_round(room_id: str, db: Session = Depends(get_db)):
     try:
         # 1. 建立新回合（含配對）
         new_round = RoundManager.create_round(db, room_id)
-
-        # 2. 發送 WebSocket 通知（非阻塞）
-        asyncio.create_task(
-            _notify_round_started(room_id, new_round.round_number, new_round.phase.value)
-        )
 
         return {
             "status": "ok",
@@ -204,7 +207,7 @@ async def next_round(room_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{room_id}/end")
-async def end_game(room_id: str, db: Session = Depends(get_db)):
+def end_game(room_id: str, db: Session = Depends(get_db)):
     """
     結束遊戲（Host endpoint）
 
@@ -213,17 +216,11 @@ async def end_game(room_id: str, db: Session = Depends(get_db)):
 
     流程：
     1. 呼叫 RoomManager.end_game()
-    2. 非同步發送 WebSocket 通知（GAME_ENDED）
-    3. 返回成功
+    2. 返回成功（前端短輪詢會看到狀態變更）
     """
     try:
         # 1. 結束遊戲（業務邏輯）
         RoomManager.end_game(db, room_id)
-
-        # 2. 發送 WebSocket 通知（非阻塞）
-        asyncio.create_task(
-            _notify_game_ended(room_id)
-        )
 
         return {"status": "ok"}
 
@@ -355,27 +352,3 @@ def get_events_since(
     except Exception as e:
         logger.error(f"Failed to get events: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error")
-
-
-# ============ WebSocket 通知輔助函式 ============
-# 這些函式確保 WebSocket 通知在 DB commit 之後發送
-
-async def _notify_room_started(room_id: str):
-    """發送「遊戲開始」通知"""
-    await asyncio.sleep(0)  # 讓出控制權，確保 DB commit 完成
-    await broadcast_event(room_id, WSEventType.ROOM_STARTED, {})
-
-
-async def _notify_round_started(room_id: str, round_number: int, phase: str):
-    """發送「回合開始」通知"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.ROUND_STARTED, {
-        "round_number": round_number,
-        "phase": phase
-    })
-
-
-async def _notify_game_ended(room_id: str):
-    """發送「遊戲結束」通知"""
-    await asyncio.sleep(0)
-    await broadcast_event(room_id, WSEventType.GAME_ENDED, {})
