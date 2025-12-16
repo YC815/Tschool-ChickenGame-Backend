@@ -134,6 +134,15 @@ class PlayerSubmissionStatus(BaseModel):
         from_attributes = True
 
 
+class RoundHistoryEntry(BaseModel):
+    round_number: int
+    your_choice: Optional[Choice] = None
+    opponent_choice: Optional[Choice] = None
+    your_payoff: Optional[int] = None
+    opponent_payoff: Optional[int] = None
+    opponent_display_name: Optional[str] = None
+
+
 class RoundStatePayload(BaseModel):
     round_number: int
     phase: RoundPhase
@@ -168,6 +177,8 @@ class RoomStatePayload(BaseModel):
     indicator_symbol: Optional[str] = None
     indicators_assigned: bool = False
     message: Optional[MessageStatePayload] = None
+    player_history: Optional[list[RoundHistoryEntry]] = None
+    player_total_payoff: Optional[int] = None
     version: int
 
 
@@ -186,6 +197,8 @@ class GameStats(BaseModel):
 class GameSummaryResponse(BaseModel):
     players: list[PlayerSummary]
     stats: GameStats
+    player_history: Optional[list[RoundHistoryEntry]] = None
+    player_total_payoff: Optional[int] = None
 
     class Config:
         from_attributes = True

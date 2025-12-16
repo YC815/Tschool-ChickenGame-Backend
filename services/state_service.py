@@ -35,6 +35,8 @@ from services.pairing_service import (
     get_pairs_in_round
 )
 from services.round_phase_service import is_message_round
+from services.history_service import get_player_round_history
+from services.payoff_service import calculate_total_payoff
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,8 @@ def build_room_state(
     message_payload: Optional[MessageStatePayload] = None
     indicator_symbol: Optional[str] = None
     indicators_ready = indicators_already_assigned(room_id, db)
+    player_history: Optional[list] = None
+    player_total_payoff: Optional[int] = None
 
     current_round: Optional[Round] = None
     if room.current_round > 0:
@@ -192,6 +196,10 @@ def build_room_state(
             except ValueError:
                 indicator_symbol = None
 
+    if player_id:
+        player_history = get_player_round_history(room_id, player_id, db)
+        player_total_payoff = calculate_total_payoff(player_id, db)
+
     state_payload = RoomStatePayload(
         room=RoomStatusResponse(
             room_id=room.id,
@@ -205,6 +213,8 @@ def build_room_state(
         indicator_symbol=indicator_symbol,
         indicators_assigned=indicators_ready,
         message=message_payload,
+        player_history=player_history,
+        player_total_payoff=player_total_payoff,
         version=current_version,
     )
 

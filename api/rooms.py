@@ -37,6 +37,7 @@ from core.exceptions import (
     MaxRoundsReached
 )
 from services.payoff_service import calculate_total_payoff
+from services.history_service import get_player_round_history
 from services.state_service import build_room_state
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
@@ -322,7 +323,11 @@ def end_game(room_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{room_id}/summary", response_model=GameSummaryResponse)
-def get_game_summary(room_id: str, db: Session = Depends(get_db)):
+def get_game_summary(
+    room_id: str,
+    player_id: str | None = Query(None, description="Optional player_id to include personal history"),
+    db: Session = Depends(get_db)
+):
     """
     取得遊戲摘要（排名和統計）
 
@@ -378,7 +383,21 @@ def get_game_summary(room_id: str, db: Session = Depends(get_db)):
             turn_ratio=round(turn_ratio, 2)
         )
 
-        return GameSummaryResponse(players=player_summaries, stats=stats)
+        player_history = None
+        player_total = None
+        if player_id:
+            target_player = next((p for p in players if p.id == player_id), None)
+            if not target_player:
+                raise HTTPException(status_code=404, detail="Player not found in this room")
+            player_history = get_player_round_history(room_id, player_id, db)
+            player_total = calculate_total_payoff(player_id, db)
+
+        return GameSummaryResponse(
+            players=player_summaries,
+            stats=stats,
+            player_history=player_history,
+            player_total_payoff=player_total
+        )
 
     except RoomNotFound:
         raise HTTPException(status_code=404, detail="Room not found")
